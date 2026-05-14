@@ -1,0 +1,6 @@
+.env
+.gocache/
+.gomodcache/
+bin/
+dist/
+*.log

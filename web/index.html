@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ternura Agent Console</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar" aria-label="Ternura status">
+        <header class="brand">
+          <div class="brand-mark" aria-hidden="true">T</div>
+          <div>
+            <h1>Ternura</h1>
+            <p>Memory</p>
+          </div>
+        </header>
+
+        <section class="status-list" aria-label="Runtime status">
+          <div class="status-row">
+            <span>Model</span>
+            <strong id="modelName">MiniMax-M2.7</strong>
+          </div>
+          <div class="status-row">
+            <span>Session</span>
+            <strong id="sessionState">Idle</strong>
+          </div>
+          <div class="status-row">
+            <span>Context</span>
+            <strong id="contextState">Ready</strong>
+          </div>
+          <div class="status-row">
+            <span>Memory</span>
+            <strong id="memoryState">Ready</strong>
+          </div>
+        </section>
+
+        <section class="events-panel" aria-label="Events">
+          <h2>Events</h2>
+          <ol id="eventsList" class="events-list">
+            <li class="event active">Ready</li>
+          </ol>
+        </section>
+
+        <button id="resetButton" class="reset-button" type="button">
+          <span aria-hidden="true">↻</span>
+          <span>Reset chat</span>
+        </button>
+      </aside>
+
+      <section class="console">
+        <header class="console-header">
+          <div>
+            <h2>Agent Console</h2>
+            <p id="consoleStatus">Ready</p>
+          </div>
+          <button id="stopButton" class="stop-button" type="button" title="Stop response" aria-label="Stop response">
+            <span aria-hidden="true"></span>
+          </button>
+        </header>
+
+        <section id="conversation" class="conversation" aria-live="polite"></section>
+
+        <form id="composer" class="composer">
+          <textarea id="promptInput" name="prompt" placeholder="Ask Ternura..." rows="3"></textarea>
+          <button id="sendButton" class="send-button" type="submit">
+            <span aria-hidden="true">↗</span>
+            <span>Send</span>
+          </button>
+        </form>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
