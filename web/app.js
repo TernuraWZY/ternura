@@ -4,19 +4,39 @@ const promptInput = document.querySelector("#promptInput");
 const sendButton = document.querySelector("#sendButton");
 const resetButton = document.querySelector("#resetButton");
 const stopButton = document.querySelector("#stopButton");
+const themeButton = document.querySelector("#themeButton");
 const eventsList = document.querySelector("#eventsList");
 const consoleStatus = document.querySelector("#consoleStatus");
 const sessionState = document.querySelector("#sessionState");
+const runState = document.querySelector("#runState");
 const contextState = document.querySelector("#contextState");
 const memoryState = document.querySelector("#memoryState");
 
 const AUTO_SCROLL_THRESHOLD = 220;
+const THEME_STORAGE_KEY = "ternura-theme";
+const LIGHT_THEME = "light";
+const DARK_THEME = "dark";
 
 let controller = null;
 let eventCount = 1;
 let followConversation = true;
 let scrollFrame = null;
+let currentRun = null;
 const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+const colorSchemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+applyTheme(getInitialTheme(), false);
+
+themeButton.addEventListener("click", () => {
+  const nextTheme = document.documentElement.dataset.theme === DARK_THEME ? LIGHT_THEME : DARK_THEME;
+  applyTheme(nextTheme, true);
+});
+
+colorSchemeQuery.addEventListener("change", () => {
+  if (!readStoredTheme()) {
+    applyTheme(preferredSystemTheme(), false);
+  }
+});
 
 conversation.addEventListener("scroll", () => {
   followConversation = isConversationNearBottom();
@@ -59,9 +79,11 @@ composer.addEventListener("submit", async (event) => {
   } catch (error) {
     if (error.name === "AbortError") {
       streamingMessage.setContent("Request stopped.");
+      completeRunFromClient("cancelled");
       addEvent("Stopped");
     } else {
       streamingMessage.remove();
+      completeRunFromClient("failed");
       addAssistantMessage(localFallback(message, error.message));
       addEvent("Local preview");
     }
@@ -79,8 +101,10 @@ resetButton.addEventListener("click", async () => {
   conversation.replaceChildren();
   followConversation = true;
   eventCount = 0;
+  currentRun = null;
   eventsList.replaceChildren();
   addEvent("Ready");
+  setRunState(null);
   setState("Idle", "Ready", "Ready", "Ready");
 
   try {
@@ -113,13 +137,139 @@ promptInput.addEventListener("keydown", (event) => {
   }
 });
 
+function getInitialTheme() {
+  return readStoredTheme() || preferredSystemTheme();
+}
+
+function preferredSystemTheme() {
+  return colorSchemeQuery.matches ? DARK_THEME : LIGHT_THEME;
+}
+
+function readStoredTheme() {
+  try {
+    const theme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return theme === DARK_THEME || theme === LIGHT_THEME ? theme : "";
+  } catch {
+    return "";
+  }
+}
+
+function writeStoredTheme(theme) {
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    // Theme switching should keep working even when storage is blocked.
+  }
+}
+
+function applyTheme(theme, persist) {
+  const nextTheme = theme === DARK_THEME ? DARK_THEME : LIGHT_THEME;
+  document.documentElement.dataset.theme = nextTheme;
+  themeButton.setAttribute("aria-pressed", String(nextTheme === DARK_THEME));
+  themeButton.setAttribute("aria-label", nextTheme === DARK_THEME ? "Switch to light mode" : "Switch to dark mode");
+  themeButton.title = nextTheme === DARK_THEME ? "Switch to light mode" : "Switch to dark mode";
+
+  if (persist) {
+    writeStoredTheme(nextTheme);
+  }
+}
+
+function startRun(event) {
+  currentRun = {
+    id: event.run_id || "",
+    status: event.status || "running",
+    startedAt: event.started_at || "",
+    durationMS: 0,
+  };
+  setRunState(currentRun);
+  setState("Running", "Active", "Writing", "Running");
+  addEvent(`Run started · ${currentRun.id}`);
+}
+
+function finishRun(event) {
+  currentRun = {
+    id: event.run_id || currentRun?.id || "",
+    status: event.status || "succeeded",
+    startedAt: event.started_at || currentRun?.startedAt || "",
+    finishedAt: event.finished_at || "",
+    durationMS: event.duration_ms || 0,
+  };
+  setRunState(currentRun);
+
+  const statusLabel = runStatusLabel(currentRun.status);
+  const duration = formatDuration(currentRun.durationMS);
+  setState("Idle", "Ready", "Ready", `${statusLabel} · ${duration}`);
+  addEvent(`Run ${statusLabel.toLowerCase()} · ${currentRun.id} · ${duration}`);
+}
+
+function completeRunFromClient(status) {
+  if (!currentRun || currentRun.status !== "running") {
+    return;
+  }
+
+  const startedAt = currentRun.startedAt ? Date.parse(currentRun.startedAt) : Date.now();
+  const durationMS = Math.max(0, Date.now() - startedAt);
+  finishRun({
+    run_id: currentRun.id,
+    status,
+    started_at: currentRun.startedAt,
+    finished_at: new Date().toISOString(),
+    duration_ms: durationMS,
+  });
+}
+
+function setRunState(run) {
+  if (!run || !run.id) {
+    runState.textContent = "No run";
+    runState.removeAttribute("title");
+    return;
+  }
+  const duration = run.durationMS > 0 ? ` · ${formatDuration(run.durationMS)}` : "";
+  const label = `${run.id} · ${runStatusLabel(run.status)}${duration}`;
+  runState.textContent = label;
+  runState.title = label;
+}
+
+function runStatusLabel(status) {
+  switch (status) {
+    case "running":
+      return "Running";
+    case "succeeded":
+      return "Done";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+    default:
+      return status || "Unknown";
+  }
+}
+
+function formatDuration(durationMS) {
+  if (!Number.isFinite(durationMS) || durationMS <= 0) {
+    return "<1s";
+  }
+  if (durationMS < 1000) {
+    return `${durationMS}ms`;
+  }
+  return `${(durationMS / 1000).toFixed(durationMS < 10000 ? 1 : 0)}s`;
+}
+
 function setRunning(isRunning) {
   sendButton.disabled = isRunning;
   resetButton.disabled = isRunning;
-  setState(isRunning ? "Running" : "Idle", isRunning ? "Active" : "Ready", "Ready", isRunning ? "Writing" : "Ready");
-  consoleStatus.textContent = isRunning ? "Running" : "Ready";
   if (isRunning) {
+    setState("Running", "Active", "Ready", "Writing");
+    consoleStatus.textContent = "Running";
     addEvent("Thinking");
+    return;
+  }
+
+  sessionState.textContent = "Idle";
+  contextState.textContent = "Ready";
+  memoryState.textContent = "Ready";
+  if (!currentRun || currentRun.status === "running") {
+    consoleStatus.textContent = "Ready";
   }
 }
 
@@ -265,6 +415,14 @@ function addStreamingAssistantMessage() {
 
 function applyStreamEvent(message, event) {
   switch (event.type) {
+    case "run_start":
+      startRun(event);
+      return;
+    case "run_done":
+    case "run_failed":
+    case "run_cancelled":
+      finishRun(event);
+      return;
     case "start":
       return;
     case "trace_start":

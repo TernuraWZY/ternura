@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -73,6 +74,11 @@ type chatResponse struct {
 	Content    string                   `json:"content,omitempty"`
 	Trace      []ternura.AgentTraceItem `json:"trace,omitempty"`
 	RawContent string                   `json:"raw_content,omitempty"`
+	RunID      string                   `json:"run_id,omitempty"`
+	Status     string                   `json:"status,omitempty"`
+	StartedAt  string                   `json:"started_at,omitempty"`
+	FinishedAt string                   `json:"finished_at,omitempty"`
+	DurationMS int64                    `json:"duration_ms,omitempty"`
 	Error      string                   `json:"error,omitempty"`
 }
 
@@ -110,16 +116,27 @@ func (s *agentServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	run := newRunLifecycle()
+	logRunStart(run)
+
 	result, err := s.agent.RunWithTrace(r.Context(), req.Message)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, chatResponse{Error: err.Error()})
+		finished := time.Now()
+		logRunFinish(run, runStatusFailed, finished)
+		resp := chatResponse{Error: err.Error()}
+		applyRunFields(&resp, run, runStatusFailed, finished)
+		writeJSON(w, http.StatusBadGateway, resp)
 		return
 	}
-	writeJSON(w, http.StatusOK, chatResponse{
+	finished := time.Now()
+	logRunFinish(run, runStatusSucceeded, finished)
+	resp := chatResponse{
 		Content:    result.Content,
 		Trace:      result.Trace,
 		RawContent: result.RawContent,
-	})
+	}
+	applyRunFields(&resp, run, runStatusSucceeded, finished)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
@@ -152,22 +169,51 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	run := newRunLifecycle()
+	logRunStart(run)
+
 	streamer := newSmoothStreamWriter(r.Context(), w, flusher)
 	defer func() {
 		_ = streamer.Close()
 	}()
-	emit := streamer.Emit
+	emit := func(event ternura.AgentStreamEvent) error {
+		event.RunID = run.ID
+		return streamer.Emit(event)
+	}
 
-	if err := emit(ternura.AgentStreamEvent{Type: "start"}); err != nil {
+	if err := emit(run.startEvent()); err != nil {
+		return
+	}
+	if err := emit(ternura.AgentStreamEvent{
+		Type:      eventTypeStart,
+		Status:    runStatusRunning,
+		StartedAt: run.StartedAt.Format(time.RFC3339Nano),
+	}); err != nil {
 		return
 	}
 
 	if _, err := s.agent.RunStreaming(r.Context(), req.Message, emit); err != nil {
-		_ = emit(ternura.AgentStreamEvent{
-			Type:  "error",
-			Error: err.Error(),
-		})
+		status := runStatusFailed
+		eventType := eventTypeRunFailed
+		if r.Context().Err() != nil {
+			status = runStatusCancelled
+			eventType = eventTypeRunCancelled
+		}
+		finished := time.Now()
+		logRunFinish(run, status, finished)
+		_ = emit(run.finishEvent(eventType, status, finished, err))
+		if status == runStatusFailed {
+			_ = emit(ternura.AgentStreamEvent{
+				Type:  eventTypeError,
+				Error: err.Error(),
+			})
+		}
+		return
 	}
+
+	finished := time.Now()
+	logRunFinish(run, runStatusSucceeded, finished)
+	_ = emit(run.finishEvent(eventTypeRunDone, runStatusSucceeded, finished, nil))
 }
 
 const (
@@ -176,11 +222,85 @@ const (
 	streamChunkRunesEnvKey  = "TERNURA_STREAM_CHUNK_RUNES"
 	streamIntervalMSEnvKey  = "TERNURA_STREAM_INTERVAL_MS"
 	traceTypeThink          = "think"
+	eventTypeStart          = "start"
+	eventTypeError          = "error"
+	eventTypeRunStart       = "run_start"
+	eventTypeRunDone        = "run_done"
+	eventTypeRunFailed      = "run_failed"
+	eventTypeRunCancelled   = "run_cancelled"
 	eventTypeContentDelta   = "content_delta"
 	eventTypeTraceStart     = "trace_start"
 	eventTypeTraceDelta     = "trace_delta"
 	eventTypeTraceDone      = "trace_done"
+	runStatusRunning        = "running"
+	runStatusSucceeded      = "succeeded"
+	runStatusFailed         = "failed"
+	runStatusCancelled      = "cancelled"
 )
+
+var runSequence uint64
+
+type runLifecycle struct {
+	ID        string
+	StartedAt time.Time
+}
+
+func newRunLifecycle() runLifecycle {
+	startedAt := time.Now()
+	sequence := atomic.AddUint64(&runSequence, 1)
+	return runLifecycle{
+		ID:        fmt.Sprintf("run-%s-%04d", startedAt.UTC().Format("20060102T150405"), sequence),
+		StartedAt: startedAt,
+	}
+}
+
+func (r runLifecycle) startEvent() ternura.AgentStreamEvent {
+	return ternura.AgentStreamEvent{
+		Type:      eventTypeRunStart,
+		RunID:     r.ID,
+		Status:    runStatusRunning,
+		StartedAt: r.StartedAt.Format(time.RFC3339Nano),
+	}
+}
+
+func (r runLifecycle) finishEvent(eventType string, status string, finishedAt time.Time, runErr error) ternura.AgentStreamEvent {
+	event := ternura.AgentStreamEvent{
+		Type:       eventType,
+		RunID:      r.ID,
+		Status:     status,
+		StartedAt:  r.StartedAt.Format(time.RFC3339Nano),
+		FinishedAt: finishedAt.Format(time.RFC3339Nano),
+		DurationMS: durationMillis(r.StartedAt, finishedAt),
+	}
+	if runErr != nil {
+		event.Error = runErr.Error()
+	}
+	return event
+}
+
+func applyRunFields(resp *chatResponse, run runLifecycle, status string, finishedAt time.Time) {
+	resp.RunID = run.ID
+	resp.Status = status
+	resp.StartedAt = run.StartedAt.Format(time.RFC3339Nano)
+	resp.FinishedAt = finishedAt.Format(time.RFC3339Nano)
+	resp.DurationMS = durationMillis(run.StartedAt, finishedAt)
+}
+
+func durationMillis(startedAt time.Time, finishedAt time.Time) int64 {
+	duration := finishedAt.Sub(startedAt).Milliseconds()
+	if duration < 0 {
+		return 0
+	}
+	return duration
+}
+
+func logRunStart(run runLifecycle) {
+	log.Printf("run %s started at %s", run.ID, run.StartedAt.Format(time.RFC3339Nano))
+}
+
+func logRunFinish(run runLifecycle, status string, finishedAt time.Time) {
+	log.Printf("run %s finished status=%s duration_ms=%d", run.ID, status, durationMillis(run.StartedAt, finishedAt))
+}
 
 type smoothStreamWriter struct {
 	ctx            context.Context

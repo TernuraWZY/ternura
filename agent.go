@@ -38,6 +38,11 @@ type AgentTraceItem struct {
 
 type AgentStreamEvent struct {
 	Type       string           `json:"type"`
+	RunID      string           `json:"run_id,omitempty"`
+	Status     string           `json:"status,omitempty"`
+	StartedAt  string           `json:"started_at,omitempty"`
+	FinishedAt string           `json:"finished_at,omitempty"`
+	DurationMS int64            `json:"duration_ms,omitempty"`
 	ID         string           `json:"id,omitempty"`
 	TraceType  string           `json:"trace_type,omitempty"`
 	Title      string           `json:"title,omitempty"`

@@ -4,6 +4,21 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Ternura Agent Console</title>
+    <script>
+      (() => {
+        const key = "ternura-theme";
+        let theme = "";
+        try {
+          theme = window.localStorage.getItem(key) || "";
+        } catch {
+          theme = "";
+        }
+        if (theme !== "dark" && theme !== "light") {
+          theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
@@ -25,6 +40,10 @@
           <div class="status-row">
             <span>Session</span>
             <strong id="sessionState">Idle</strong>
+          </div>
+          <div class="status-row run-status-row">
+            <span>Run</span>
+            <strong id="runState">No run</strong>
           </div>
           <div class="status-row">
             <span>Context</span>
@@ -55,9 +74,14 @@
             <h2>Agent Console</h2>
             <p id="consoleStatus">Ready</p>
           </div>
-          <button id="stopButton" class="stop-button" type="button" title="Stop response" aria-label="Stop response">
-            <span aria-hidden="true"></span>
-          </button>
+          <div class="header-actions">
+            <button id="themeButton" class="theme-button" type="button" title="Switch theme" aria-label="Switch theme" aria-pressed="false">
+              <span class="theme-icon" aria-hidden="true"></span>
+            </button>
+            <button id="stopButton" class="stop-button" type="button" title="Stop response" aria-label="Stop response">
+              <span aria-hidden="true"></span>
+            </button>
+          </div>
         </header>
 
         <section id="conversation" class="conversation" aria-live="polite"></section>
