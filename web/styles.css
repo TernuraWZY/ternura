@@ -24,7 +24,8 @@
 html,
 body {
   margin: 0;
-  min-height: 100%;
+  height: 100%;
+  overflow: hidden;
 }
 
 body {
@@ -44,19 +45,24 @@ textarea {
 .app-shell {
   display: grid;
   grid-template-columns: 432px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   overflow: hidden;
   background: var(--bg);
 }
 
 .sidebar {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   flex-direction: column;
   gap: 24px;
   padding: 36px 24px 28px;
   border-right: 1px solid var(--line);
   background: var(--panel);
+  overflow: hidden;
 }
 
 .brand {
@@ -129,6 +135,7 @@ textarea {
 
 .events-panel {
   display: grid;
+  min-height: 0;
   gap: 10px;
 }
 
@@ -195,9 +202,12 @@ textarea {
 .console {
   display: grid;
   min-width: 0;
-  min-height: 100vh;
-  grid-template-rows: 117px minmax(0, 1fr) 190px;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  grid-template-rows: 117px minmax(0, 1fr) auto;
   background: var(--bg);
+  overflow: hidden;
 }
 
 .console-header {
@@ -235,6 +245,7 @@ textarea {
   min-height: 0;
   padding: 28px 36px;
   overflow: auto;
+  overscroll-behavior: contain;
   background: var(--canvas);
 }
 
@@ -485,23 +496,26 @@ textarea {
 
 .composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 143px;
-  gap: 17px;
-  padding: 24px 36px 28px;
+  grid-template-columns: minmax(0, 1fr) 118px;
+  gap: 14px;
+  min-height: 132px;
+  padding: 18px 36px;
   border-top: 1px solid var(--line);
   background: var(--panel);
+  overflow: hidden;
 }
 
 .composer textarea {
+  display: block;
   width: 100%;
-  min-height: 138px;
+  min-height: 96px;
   resize: none;
-  padding: 24px 20px;
+  padding: 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
   color: var(--text);
   background: var(--panel);
-  font-size: 22px;
+  font-size: 18px;
   line-height: 1.35;
   outline: none;
 }
@@ -519,15 +533,15 @@ textarea {
 .send-button {
   display: flex;
   min-width: 0;
-  min-height: 138px;
+  min-height: 96px;
   align-items: center;
   justify-content: center;
-  gap: 11px;
+  gap: 9px;
   border: 0;
   border-radius: 8px;
   color: #fff;
   background: var(--teal);
-  font-size: 22px;
+  font-size: 18px;
   font-weight: 600;
   cursor: pointer;
   transition: background 160ms ease, transform 160ms ease;
@@ -546,11 +560,15 @@ textarea {
 @media (max-width: 980px) {
   .app-shell {
     grid-template-columns: 1fr;
-    min-height: 100svh;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100svh;
+    height: 100dvh;
+    min-height: 0;
   }
 
   .sidebar {
-    min-height: auto;
+    height: auto;
+    min-height: 0;
     gap: 18px;
     padding: 22px 18px;
     border-right: 0;
@@ -570,8 +588,9 @@ textarea {
   }
 
   .console {
-    min-height: calc(100svh - 360px);
-    grid-template-rows: 92px minmax(360px, 1fr) auto;
+    height: auto;
+    min-height: 0;
+    grid-template-rows: 92px minmax(0, 1fr) auto;
   }
 
   .console-header {
@@ -584,13 +603,14 @@ textarea {
 
   .composer {
     grid-template-columns: 1fr;
-    padding: 18px;
+    min-height: 140px;
+    padding: 14px 18px;
   }
 
   .composer textarea,
   .send-button {
-    min-height: 84px;
-    font-size: 18px;
+    min-height: 72px;
+    font-size: 16px;
   }
 }
 

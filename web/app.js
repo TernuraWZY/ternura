@@ -10,8 +10,17 @@ const sessionState = document.querySelector("#sessionState");
 const contextState = document.querySelector("#contextState");
 const memoryState = document.querySelector("#memoryState");
 
+const AUTO_SCROLL_THRESHOLD = 220;
+
 let controller = null;
 let eventCount = 1;
+let followConversation = true;
+let scrollFrame = null;
+const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+conversation.addEventListener("scroll", () => {
+  followConversation = isConversationNearBottom();
+}, { passive: true });
 
 composer.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -22,7 +31,8 @@ composer.addEventListener("submit", async (event) => {
   }
 
   promptInput.value = "";
-  addUserMessage(message);
+  const userMessage = addUserMessage(message);
+  scrollToMessage(userMessage);
   addEvent("Prompt queued");
   setRunning(true);
 
@@ -62,7 +72,12 @@ composer.addEventListener("submit", async (event) => {
 });
 
 resetButton.addEventListener("click", async () => {
+  if (scrollFrame) {
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = null;
+  }
   conversation.replaceChildren();
+  followConversation = true;
   eventCount = 0;
   eventsList.replaceChildren();
   addEvent("Ready");
@@ -134,7 +149,6 @@ function addUserMessage(text) {
   const wrapper = createMessage("user", "You");
   wrapper.append(renderMarkdown(text));
   conversation.append(wrapper);
-  scrollConversation();
   return wrapper;
 }
 
@@ -178,7 +192,6 @@ function addStreamingAssistantMessage() {
   finalSection.append(finalLabel, finalBody);
   wrapper.append(finalSection);
   conversation.append(wrapper);
-  scrollConversation();
 
   function ensureTrace() {
     if (traceDetails) {
@@ -186,7 +199,6 @@ function addStreamingAssistantMessage() {
     }
     traceDetails = document.createElement("details");
     traceDetails.className = "trace-details";
-    traceDetails.open = true;
 
     const summary = document.createElement("summary");
     summary.textContent = "Reasoning & tool use";
@@ -338,7 +350,6 @@ function createMessage(kind, label) {
 function createTrace(trace, pending) {
   const details = document.createElement("details");
   details.className = "trace-details";
-  details.open = pending;
 
   const summary = document.createElement("summary");
   summary.textContent = "Reasoning & tool use";
@@ -363,7 +374,51 @@ function createTrace(trace, pending) {
 }
 
 function scrollConversation() {
-  conversation.scrollTop = conversation.scrollHeight;
+  if (!followConversation) {
+    return;
+  }
+
+  scheduleConversationScroll(() => {
+    if (!followConversation) {
+      return;
+    }
+    conversation.scrollTo({
+      top: conversation.scrollHeight,
+      behavior: scrollBehavior("auto"),
+    });
+    followConversation = true;
+  });
+}
+
+function scrollToMessage(message) {
+  followConversation = true;
+  scheduleConversationScroll(() => {
+    const top = Math.max(0, message.offsetTop + message.offsetHeight - conversation.clientHeight + 20);
+    conversation.scrollTo({
+      top,
+      behavior: scrollBehavior("smooth"),
+    });
+  });
+}
+
+function scheduleConversationScroll(callback) {
+  if (scrollFrame) {
+    cancelAnimationFrame(scrollFrame);
+  }
+
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = null;
+    callback();
+  });
+}
+
+function isConversationNearBottom() {
+  const distance = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight;
+  return distance <= AUTO_SCROLL_THRESHOLD;
+}
+
+function scrollBehavior(behavior) {
+  return reducedMotionQuery.matches ? "auto" : behavior;
 }
 
 function renderMarkdown(markdown) {
