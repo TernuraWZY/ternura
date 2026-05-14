@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -149,20 +152,208 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	emit := func(event ternura.AgentStreamEvent) error {
-		return writeSSE(w, flusher, event)
-	}
+	streamer := newSmoothStreamWriter(r.Context(), w, flusher)
+	defer func() {
+		_ = streamer.Close()
+	}()
+	emit := streamer.Emit
 
-	if err := writeSSE(w, flusher, ternura.AgentStreamEvent{Type: "start"}); err != nil {
+	if err := emit(ternura.AgentStreamEvent{Type: "start"}); err != nil {
 		return
 	}
 
 	if _, err := s.agent.RunStreaming(r.Context(), req.Message, emit); err != nil {
-		_ = writeSSE(w, flusher, ternura.AgentStreamEvent{
+		_ = emit(ternura.AgentStreamEvent{
 			Type:  "error",
 			Error: err.Error(),
 		})
 	}
+}
+
+const (
+	defaultStreamChunkRunes = 3
+	defaultStreamIntervalMS = 35
+	streamChunkRunesEnvKey  = "TERNURA_STREAM_CHUNK_RUNES"
+	streamIntervalMSEnvKey  = "TERNURA_STREAM_INTERVAL_MS"
+	traceTypeThink          = "think"
+	eventTypeContentDelta   = "content_delta"
+	eventTypeTraceStart     = "trace_start"
+	eventTypeTraceDelta     = "trace_delta"
+	eventTypeTraceDone      = "trace_done"
+)
+
+type smoothStreamWriter struct {
+	ctx            context.Context
+	w              http.ResponseWriter
+	flusher        http.Flusher
+	chunkRunes     int
+	interval       time.Duration
+	events         chan ternura.AgentStreamEvent
+	done           chan struct{}
+	closeOnce      sync.Once
+	errMu          sync.Mutex
+	err            error
+	lastSmoothSent time.Time
+	traceTypes     map[string]string
+}
+
+func newSmoothStreamWriter(ctx context.Context, w http.ResponseWriter, flusher http.Flusher) *smoothStreamWriter {
+	chunkRunes := envInt(streamChunkRunesEnvKey, defaultStreamChunkRunes)
+	if chunkRunes < 1 {
+		chunkRunes = defaultStreamChunkRunes
+	}
+
+	intervalMS := envInt(streamIntervalMSEnvKey, defaultStreamIntervalMS)
+	if intervalMS < 0 {
+		intervalMS = defaultStreamIntervalMS
+	}
+
+	streamer := &smoothStreamWriter{
+		ctx:        ctx,
+		w:          w,
+		flusher:    flusher,
+		chunkRunes: chunkRunes,
+		interval:   time.Duration(intervalMS) * time.Millisecond,
+		events:     make(chan ternura.AgentStreamEvent, 128),
+		done:       make(chan struct{}),
+		traceTypes: make(map[string]string),
+	}
+	go streamer.run()
+	return streamer
+}
+
+func (s *smoothStreamWriter) Emit(event ternura.AgentStreamEvent) error {
+	select {
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	case <-s.done:
+		return s.getErr()
+	case s.events <- event:
+		return nil
+	}
+}
+
+func (s *smoothStreamWriter) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.events)
+	})
+	<-s.done
+	return s.getErr()
+}
+
+func (s *smoothStreamWriter) run() {
+	defer close(s.done)
+	for event := range s.events {
+		if err := s.writeEvent(event); err != nil {
+			s.setErr(err)
+			return
+		}
+	}
+}
+
+func (s *smoothStreamWriter) writeEvent(event ternura.AgentStreamEvent) error {
+	switch event.Type {
+	case eventTypeContentDelta:
+		return s.emitDelta(event, true)
+	case eventTypeTraceStart:
+		s.traceTypes[event.ID] = event.TraceType
+		return writeSSE(s.w, s.flusher, event)
+	case eventTypeTraceDelta:
+		return s.emitDelta(event, s.traceTypes[event.ID] == traceTypeThink)
+	case eventTypeTraceDone:
+		delete(s.traceTypes, event.ID)
+		return writeSSE(s.w, s.flusher, event)
+	default:
+		return writeSSE(s.w, s.flusher, event)
+	}
+}
+
+func (s *smoothStreamWriter) setErr(err error) {
+	s.errMu.Lock()
+	defer s.errMu.Unlock()
+	s.err = err
+}
+
+func (s *smoothStreamWriter) getErr() error {
+	s.errMu.Lock()
+	defer s.errMu.Unlock()
+	return s.err
+}
+
+func (s *smoothStreamWriter) emitDelta(event ternura.AgentStreamEvent, smooth bool) error {
+	if event.Delta == "" {
+		return nil
+	}
+	if !smooth || s.interval == 0 {
+		return writeSSE(s.w, s.flusher, event)
+	}
+
+	chunks := chunkStringByRunes(event.Delta, s.chunkRunes)
+	for _, chunk := range chunks {
+		if err := s.waitForCadence(); err != nil {
+			return err
+		}
+		next := event
+		next.Delta = chunk
+		if err := writeSSE(s.w, s.flusher, next); err != nil {
+			return err
+		}
+		s.lastSmoothSent = time.Now()
+	}
+	return nil
+}
+
+func (s *smoothStreamWriter) waitForCadence() error {
+	if s.interval == 0 || s.lastSmoothSent.IsZero() {
+		return nil
+	}
+
+	delay := s.interval - time.Since(s.lastSmoothSent)
+	if delay <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func chunkStringByRunes(value string, chunkRunes int) []string {
+	if value == "" {
+		return nil
+	}
+	if chunkRunes < 1 {
+		chunkRunes = 1
+	}
+
+	runes := []rune(value)
+	chunks := make([]string, 0, (len(runes)+chunkRunes-1)/chunkRunes)
+	for start := 0; start < len(runes); start += chunkRunes {
+		end := start + chunkRunes
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunks = append(chunks, string(runes[start:end]))
+	}
+	return chunks
+}
+
+func envInt(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
 }
 
 func (s *agentServer) handleReset(w http.ResponseWriter, r *http.Request) {
