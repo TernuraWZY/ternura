@@ -1,4 +1,5 @@
 .env
+.ternura/
 .gocache/
 .gomodcache/
 bin/

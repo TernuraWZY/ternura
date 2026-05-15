@@ -1,10 +1,13 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"ternura"
 )
 
 func TestChunkStringByRunesKeepsUTF8Boundaries(t *testing.T) {
@@ -65,5 +68,66 @@ func TestApplyRunFieldsDecoratesJSONResponse(t *testing.T) {
 	}
 	if resp.DurationMS != 250 {
 		t.Fatalf("response duration = %d, want 250", resp.DurationMS)
+	}
+}
+
+func TestSessionStorePersistsRunsAndConversation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	store := newSessionStore(path)
+	startedAt := time.Date(2026, 5, 15, 8, 30, 0, 0, time.UTC)
+	finishedAt := startedAt.Add(2 * time.Second)
+	run := runLifecycle{ID: "run-test-0003", StartedAt: startedAt}
+
+	if err := store.StartRun(run, "hello"); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if err := store.FinishRun(run, "hello", ternura.AgentRunResult{
+		Content:    "hi",
+		RawContent: "<think>ok</think>hi",
+		Trace: []ternura.AgentTraceItem{{
+			Type:    "think",
+			Title:   "Thinking",
+			Content: "ok",
+		}},
+	}, runStatusSucceeded, finishedAt, nil); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+
+	reloaded := newSessionStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("load store: %v", err)
+	}
+	snapshot := reloaded.Snapshot()
+
+	if len(snapshot.Runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(snapshot.Runs))
+	}
+	if snapshot.Runs[0].RunID != run.ID || snapshot.Runs[0].Content != "hi" {
+		t.Fatalf("run snapshot = %+v", snapshot.Runs[0])
+	}
+	if len(snapshot.Runs[0].Trace) != 1 || snapshot.Runs[0].Trace[0].Content != "ok" {
+		t.Fatalf("trace snapshot = %+v", snapshot.Runs[0].Trace)
+	}
+	if len(snapshot.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(snapshot.Messages))
+	}
+	if snapshot.Messages[0].Role != "user" || snapshot.Messages[1].Role != "assistant" {
+		t.Fatalf("messages snapshot = %+v", snapshot.Messages)
+	}
+}
+
+func TestSessionStoreClearRemovesPersistedHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	store := newSessionStore(path)
+	run := runLifecycle{ID: "run-test-0004", StartedAt: time.Now()}
+
+	if err := store.StartRun(run, "hello"); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if err := store.Clear(); err != nil {
+		t.Fatalf("clear store: %v", err)
+	}
+	if snapshot := store.Snapshot(); len(snapshot.Runs) != 0 || len(snapshot.Messages) != 0 {
+		t.Fatalf("snapshot after clear = %+v", snapshot)
 	}
 }

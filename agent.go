@@ -36,6 +36,11 @@ type AgentTraceItem struct {
 	Content string `json:"content"`
 }
 
+type ConversationMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 type AgentStreamEvent struct {
 	Type       string           `json:"type"`
 	RunID      string           `json:"run_id,omitempty"`
@@ -66,6 +71,19 @@ func NewAgent(modelConf shared.ModelConfig, systemPrompt string, tools []tool.To
 	}
 	a.messages = append(a.messages, openai.SystemMessage(systemPrompt))
 	return &a
+}
+
+func (a *Agent) RestoreConversation(messages []ConversationMessage) {
+	a.messages = make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
+	a.messages = append(a.messages, openai.SystemMessage(a.systemPrompt))
+	for _, message := range messages {
+		switch message.Role {
+		case "user":
+			a.messages = append(a.messages, openai.UserMessage(message.Content))
+		case "assistant":
+			a.messages = append(a.messages, openai.AssistantMessage(message.Content))
+		}
+	}
 }
 
 func (a *Agent) execute(ctx context.Context, toolName string, argumentsInJSON string) (string, error) {
@@ -181,7 +199,7 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 		for stream.Next() {
 			chunk := stream.Current()
 			if !acc.AddChunk(chunk) {
-				return AgentRunResult{}, errors.New("failed to accumulate stream chunk")
+				return result, errors.New("failed to accumulate stream chunk")
 			}
 
 			for _, choice := range chunk.Choices {
@@ -210,7 +228,7 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 
 		if err := stream.Err(); err != nil {
 			log.Printf("failed to stream completion request: %v", err)
-			return AgentRunResult{}, err
+			return result, err
 		}
 		if err := contentRouter.Flush(); err != nil {
 			return result, err

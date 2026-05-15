@@ -5,6 +5,13 @@ const sendButton = document.querySelector("#sendButton");
 const resetButton = document.querySelector("#resetButton");
 const stopButton = document.querySelector("#stopButton");
 const themeButton = document.querySelector("#themeButton");
+const historyButton = document.querySelector("#historyButton");
+const historyCount = document.querySelector("#historyCount");
+const historyDialog = document.querySelector("#historyDialog");
+const historyCloseButton = document.querySelector("#historyCloseButton");
+const restoreButton = document.querySelector("#restoreButton");
+const historyState = document.querySelector("#historyState");
+const historyList = document.querySelector("#historyList");
 const eventsList = document.querySelector("#eventsList");
 const consoleStatus = document.querySelector("#consoleStatus");
 const sessionState = document.querySelector("#sessionState");
@@ -22,6 +29,7 @@ let eventCount = 1;
 let followConversation = true;
 let scrollFrame = null;
 let currentRun = null;
+let persistedRuns = [];
 const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 const colorSchemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -90,7 +98,49 @@ composer.addEventListener("submit", async (event) => {
   } finally {
     controller = null;
     setRunning(false);
+    await refreshHistoryPanel();
   }
+});
+
+historyButton.addEventListener("click", async () => {
+  await refreshHistoryPanel();
+  openHistoryDialog();
+});
+
+historyCloseButton.addEventListener("click", () => {
+  closeHistoryDialog();
+});
+
+historyDialog.addEventListener("click", (event) => {
+  if (event.target === historyDialog) {
+    closeHistoryDialog();
+  }
+});
+
+restoreButton.addEventListener("click", () => {
+  restoreHistory();
+  closeHistoryDialog();
+});
+
+historyList.addEventListener("click", (event) => {
+  const item = event.target.closest("[data-run-id]");
+  if (!item) {
+    return;
+  }
+
+  const runID = item.dataset.runId || "";
+  if (!runID) {
+    return;
+  }
+
+  if (!findRunMessage(runID)) {
+    restoreHistory({ focusRunID: runID });
+    closeHistoryDialog();
+    return;
+  }
+
+  focusRun(runID);
+  closeHistoryDialog();
 });
 
 resetButton.addEventListener("click", async () => {
@@ -106,6 +156,8 @@ resetButton.addEventListener("click", async () => {
   addEvent("Ready");
   setRunState(null);
   setState("Idle", "Ready", "Ready", "Ready");
+  persistedRuns = [];
+  renderHistoryPanel();
 
   try {
     await fetch("/api/reset", { method: "POST" });
@@ -136,6 +188,8 @@ promptInput.addEventListener("keydown", (event) => {
     promptInput.value = "";
   }
 });
+
+loadHistory();
 
 function getInitialTheme() {
   return readStoredTheme() || preferredSystemTheme();
@@ -255,9 +309,231 @@ function formatDuration(durationMS) {
   return `${(durationMS / 1000).toFixed(durationMS < 10000 ? 1 : 0)}s`;
 }
 
+async function loadHistory() {
+  try {
+    persistedRuns = await fetchHistory();
+    renderHistoryPanel();
+    if (persistedRuns.length === 0) {
+      return;
+    }
+    if (controller || conversation.children.length > 0) {
+      return;
+    }
+
+    restoreHistory();
+  } catch (error) {
+    addEvent("History unavailable");
+  }
+}
+
+async function refreshHistoryPanel() {
+  try {
+    persistedRuns = await fetchHistory();
+    renderHistoryPanel();
+  } catch {
+    historyState.textContent = "History unavailable";
+    restoreButton.disabled = true;
+  }
+}
+
+async function fetchHistory() {
+  const response = await fetch("/api/history");
+  if (!response.ok) {
+    throw new Error(`History request failed: ${response.status}`);
+  }
+
+  const history = await response.json();
+  return Array.isArray(history.runs) ? history.runs : [];
+}
+
+function restoreHistory({ focusRunID = "" } = {}) {
+  if (persistedRuns.length === 0 || controller) {
+    return;
+  }
+
+  if (scrollFrame) {
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = null;
+  }
+
+  conversation.replaceChildren();
+  followConversation = true;
+  persistedRuns.forEach(renderPersistedRun);
+
+  const targetRun = persistedRuns.find((run) => run.run_id === focusRunID) || persistedRuns[persistedRuns.length - 1];
+  currentRun = runFromHistory(targetRun);
+  setRunState(currentRun);
+  setState("Idle", "Ready", "Ready", "Ready");
+  renderHistoryPanel();
+  addEvent(`History restored · ${persistedRuns.length} runs`);
+
+  if (focusRunID) {
+    focusRun(focusRunID);
+    return;
+  }
+  scrollConversation();
+}
+
+function renderPersistedRun(run) {
+  if (run.user_message) {
+    const userMessage = addUserMessage(run.user_message);
+    userMessage.dataset.runId = run.run_id || "";
+  }
+  const assistantMessage = addAssistantMessage({
+    content: restoredRunContent(run),
+    trace: Array.isArray(run.trace) ? run.trace : [],
+  });
+  assistantMessage.dataset.runId = run.run_id || "";
+}
+
+function restoredRunContent(run) {
+  if (run.content) {
+    return run.content;
+  }
+  if (run.error) {
+    return `Run ${runStatusLabel(run.status).toLowerCase()}: ${run.error}`;
+  }
+  if (run.status === "cancelled") {
+    return "Run cancelled before a final response.";
+  }
+  if (run.status === "running") {
+    return "Run was interrupted before a final response.";
+  }
+  return "";
+}
+
+function runFromHistory(run) {
+  return {
+    id: run.run_id || "",
+    status: run.status || "succeeded",
+    startedAt: run.started_at || "",
+    finishedAt: run.finished_at || "",
+    durationMS: run.duration_ms || 0,
+  };
+}
+
+function renderHistoryPanel() {
+  const runCount = persistedRuns.length;
+  historyCount.textContent = String(runCount);
+  historyButton.title = runCount === 0 ? "No saved history" : `Open ${runCount} saved ${runCount === 1 ? "run" : "runs"}`;
+  historyList.replaceChildren();
+  restoreButton.disabled = controller !== null || runCount === 0;
+
+  if (runCount === 0) {
+    historyState.textContent = "No saved runs";
+    const empty = document.createElement("li");
+    empty.className = "history-empty";
+    empty.textContent = "No saved runs yet";
+    historyList.append(empty);
+    return;
+  }
+
+  historyState.textContent = `${runCount} ${runCount === 1 ? "run" : "runs"} saved`;
+  const activeRunID = currentRun?.id || persistedRuns[runCount - 1]?.run_id || "";
+  persistedRuns.slice().reverse().forEach((run) => {
+    const listItem = document.createElement("li");
+    listItem.className = "history-card";
+    const button = document.createElement("button");
+    button.className = "history-item";
+    button.type = "button";
+    button.dataset.runId = run.run_id || "";
+    button.title = run.run_id || "";
+    if (run.run_id === activeRunID) {
+      listItem.classList.add("active");
+    }
+
+    const header = document.createElement("span");
+    header.className = "history-item-header";
+
+    const title = document.createElement("span");
+    title.className = "history-title";
+    title.textContent = run.user_message || run.run_id || "Untitled run";
+
+    const status = document.createElement("span");
+    status.className = `history-status status-${run.status || "unknown"}`;
+    status.textContent = runStatusLabel(run.status);
+
+    header.append(title, status);
+
+    const preview = document.createElement("span");
+    preview.className = "history-preview";
+    preview.textContent = historyPreview(run);
+
+    const footer = document.createElement("span");
+    footer.className = "history-item-footer";
+
+    const id = document.createElement("span");
+    id.className = "history-id";
+    id.textContent = run.run_id || "";
+
+    const duration = document.createElement("span");
+    duration.className = "history-duration";
+    duration.textContent = formatDuration(run.duration_ms || 0);
+
+    footer.append(id, duration);
+
+    button.append(header, preview, footer);
+    listItem.append(button);
+    historyList.append(listItem);
+  });
+}
+
+function historyPreview(run) {
+  if (run.content) {
+    return run.content;
+  }
+  if (run.error) {
+    return run.error;
+  }
+  if (run.status === "running") {
+    return "Interrupted before a final response.";
+  }
+  return "No final response saved.";
+}
+
+function openHistoryDialog() {
+  if (typeof historyDialog.showModal === "function") {
+    if (!historyDialog.open) {
+      historyDialog.showModal();
+    }
+    return;
+  }
+  historyDialog.setAttribute("open", "");
+}
+
+function closeHistoryDialog() {
+  if (typeof historyDialog.close === "function" && historyDialog.open) {
+    historyDialog.close();
+    return;
+  }
+  historyDialog.removeAttribute("open");
+}
+
+function findRunMessage(runID) {
+  return [...conversation.querySelectorAll(".message")].find((message) => message.dataset.runId === runID) || null;
+}
+
+function focusRun(runID) {
+  const message = findRunMessage(runID);
+  const run = persistedRuns.find((item) => item.run_id === runID);
+  if (!message || !run) {
+    return;
+  }
+
+  currentRun = runFromHistory(run);
+  setRunState(currentRun);
+  renderHistoryPanel();
+  scrollToMessage(message);
+  message.classList.add("message-highlight");
+  window.setTimeout(() => {
+    message.classList.remove("message-highlight");
+  }, 1200);
+}
+
 function setRunning(isRunning) {
   sendButton.disabled = isRunning;
   resetButton.disabled = isRunning;
+  restoreButton.disabled = isRunning || persistedRuns.length === 0;
   if (isRunning) {
     setState("Running", "Active", "Ready", "Writing");
     consoleStatus.textContent = "Running";

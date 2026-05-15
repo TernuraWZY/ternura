@@ -64,6 +64,7 @@ type agentServer struct {
 	modelConf shared.ModelConfig
 	mu        sync.Mutex
 	agent     *ternura.Agent
+	store     *sessionStore
 }
 
 type chatRequest struct {
@@ -83,8 +84,14 @@ type chatResponse struct {
 }
 
 func newAgentServer(modelConf shared.ModelConfig) *agentServer {
-	s := &agentServer{modelConf: modelConf}
-	s.resetAgent()
+	s := &agentServer{
+		modelConf: modelConf,
+		store:     newSessionStore(defaultSessionPath),
+	}
+	if err := s.store.Load(); err != nil {
+		log.Printf("load persisted session: %v", err)
+	}
+	s.resetAgentFromHistory()
 	return s
 }
 
@@ -92,6 +99,7 @@ func (s *agentServer) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/chat", s.handleChat)
 	mux.HandleFunc("/api/chat/stream", s.handleChatStream)
+	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 	return mux
@@ -118,11 +126,17 @@ func (s *agentServer) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	run := newRunLifecycle()
 	logRunStart(run)
+	if err := s.store.StartRun(run, req.Message); err != nil {
+		log.Printf("persist run start %s: %v", run.ID, err)
+	}
 
 	result, err := s.agent.RunWithTrace(r.Context(), req.Message)
 	if err != nil {
 		finished := time.Now()
 		logRunFinish(run, runStatusFailed, finished)
+		if persistErr := s.store.FinishRun(run, req.Message, result, runStatusFailed, finished, err); persistErr != nil {
+			log.Printf("persist failed run %s: %v", run.ID, persistErr)
+		}
 		resp := chatResponse{Error: err.Error()}
 		applyRunFields(&resp, run, runStatusFailed, finished)
 		writeJSON(w, http.StatusBadGateway, resp)
@@ -130,6 +144,9 @@ func (s *agentServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	finished := time.Now()
 	logRunFinish(run, runStatusSucceeded, finished)
+	if err := s.store.FinishRun(run, req.Message, result, runStatusSucceeded, finished, nil); err != nil {
+		log.Printf("persist completed run %s: %v", run.ID, err)
+	}
 	resp := chatResponse{
 		Content:    result.Content,
 		Trace:      result.Trace,
@@ -171,6 +188,9 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	run := newRunLifecycle()
 	logRunStart(run)
+	if err := s.store.StartRun(run, req.Message); err != nil {
+		log.Printf("persist run start %s: %v", run.ID, err)
+	}
 
 	streamer := newSmoothStreamWriter(r.Context(), w, flusher)
 	defer func() {
@@ -192,7 +212,8 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.agent.RunStreaming(r.Context(), req.Message, emit); err != nil {
+	result, err := s.agent.RunStreaming(r.Context(), req.Message, emit)
+	if err != nil {
 		status := runStatusFailed
 		eventType := eventTypeRunFailed
 		if r.Context().Err() != nil {
@@ -201,6 +222,9 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 		finished := time.Now()
 		logRunFinish(run, status, finished)
+		if persistErr := s.store.FinishRun(run, req.Message, result, status, finished, err); persistErr != nil {
+			log.Printf("persist %s run %s: %v", status, run.ID, persistErr)
+		}
 		_ = emit(run.finishEvent(eventType, status, finished, err))
 		if status == runStatusFailed {
 			_ = emit(ternura.AgentStreamEvent{
@@ -213,6 +237,9 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	finished := time.Now()
 	logRunFinish(run, runStatusSucceeded, finished)
+	if err := s.store.FinishRun(run, req.Message, result, runStatusSucceeded, finished, nil); err != nil {
+		log.Printf("persist completed run %s: %v", run.ID, err)
+	}
 	_ = emit(run.finishEvent(eventTypeRunDone, runStatusSucceeded, finished, nil))
 }
 
@@ -476,6 +503,18 @@ func envInt(key string, fallback int) int {
 	return value
 }
 
+func (s *agentServer) handleHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	snapshot := s.store.Snapshot()
+	writeHistoryJSON(w, http.StatusOK, historyResponse{
+		Runs: snapshot.Runs,
+	})
+}
+
 func (s *agentServer) handleReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -483,6 +522,9 @@ func (s *agentServer) handleReset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
+	if err := s.store.Clear(); err != nil {
+		log.Printf("clear persisted session: %v", err)
+	}
 	s.resetAgent()
 	s.mu.Unlock()
 
@@ -498,11 +540,36 @@ func (s *agentServer) resetAgent() {
 	})
 }
 
+func (s *agentServer) resetAgentFromHistory() {
+	s.resetAgent()
+	snapshot := s.store.Snapshot()
+	if len(snapshot.Messages) == 0 {
+		return
+	}
+	messages := make([]ternura.ConversationMessage, 0, len(snapshot.Messages))
+	for _, message := range snapshot.Messages {
+		messages = append(messages, ternura.ConversationMessage{
+			Role:    message.Role,
+			Content: message.Content,
+		})
+	}
+	s.agent.RestoreConversation(messages)
+	log.Printf("restored %d persisted conversation messages", len(messages))
+}
+
 func writeJSON(w http.ResponseWriter, status int, value chatResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		log.Printf("write json response: %v", err)
+	}
+}
+
+func writeHistoryJSON(w http.ResponseWriter, status int, value historyResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		log.Printf("write history response: %v", err)
 	}
 }
 

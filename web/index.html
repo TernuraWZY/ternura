@@ -75,6 +75,11 @@
             <p id="consoleStatus">Ready</p>
           </div>
           <div class="header-actions">
+            <button id="historyButton" class="history-button" type="button" title="Open history" aria-label="Open history">
+              <span class="history-button-icon" aria-hidden="true"></span>
+              <span class="history-button-text">History</span>
+              <span id="historyCount" class="history-count">0</span>
+            </button>
             <button id="themeButton" class="theme-button" type="button" title="Switch theme" aria-label="Switch theme" aria-pressed="false">
               <span class="theme-icon" aria-hidden="true"></span>
             </button>
@@ -95,6 +100,22 @@
         </form>
       </section>
     </main>
+
+    <dialog id="historyDialog" class="history-dialog" aria-labelledby="historyDialogTitle">
+      <section class="history-dialog-card">
+        <header class="history-dialog-header">
+          <div>
+            <h2 id="historyDialogTitle">Session History</h2>
+            <p id="historyState" class="history-state">No saved runs</p>
+          </div>
+          <div class="history-dialog-actions">
+            <button id="restoreButton" class="restore-button" type="button" disabled>Restore all</button>
+            <button id="historyCloseButton" class="history-close-button" type="button" title="Close history" aria-label="Close history">×</button>
+          </div>
+        </header>
+        <ol id="historyList" class="history-list"></ol>
+      </section>
+    </dialog>
 
     <script src="./app.js"></script>
   </body>
