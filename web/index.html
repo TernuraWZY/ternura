@@ -55,6 +55,16 @@
           </div>
         </section>
 
+        <section class="todos-panel" aria-label="Current plan">
+          <div class="todos-header">
+            <h2>Plan</h2>
+            <span id="todoCount" class="todo-count">0</span>
+          </div>
+          <ol id="todoList" class="todos-list">
+            <li class="todo-empty">No active plan</li>
+          </ol>
+        </section>
+
         <section class="events-panel" aria-label="Events">
           <h2>Events</h2>
           <ol id="eventsList" class="events-list">
@@ -64,7 +74,7 @@
 
         <button id="resetButton" class="reset-button" type="button">
           <span aria-hidden="true">↻</span>
-          <span>Reset chat</span>
+          <span>New session</span>
         </button>
       </aside>
 
@@ -106,10 +116,10 @@
         <header class="history-dialog-header">
           <div>
             <h2 id="historyDialogTitle">Session History</h2>
-            <p id="historyState" class="history-state">No saved runs</p>
+            <p id="historyState" class="history-state">No saved sessions</p>
           </div>
           <div class="history-dialog-actions">
-            <button id="restoreButton" class="restore-button" type="button" disabled>Restore all</button>
+            <button id="restoreButton" class="restore-button" type="button" disabled>Open current</button>
             <button id="historyCloseButton" class="history-close-button" type="button" title="Close history" aria-label="Close history">×</button>
           </div>
         </header>

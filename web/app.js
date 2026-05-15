@@ -12,6 +12,8 @@ const historyCloseButton = document.querySelector("#historyCloseButton");
 const restoreButton = document.querySelector("#restoreButton");
 const historyState = document.querySelector("#historyState");
 const historyList = document.querySelector("#historyList");
+const todoCount = document.querySelector("#todoCount");
+const todoList = document.querySelector("#todoList");
 const eventsList = document.querySelector("#eventsList");
 const consoleStatus = document.querySelector("#consoleStatus");
 const sessionState = document.querySelector("#sessionState");
@@ -29,7 +31,8 @@ let eventCount = 1;
 let followConversation = true;
 let scrollFrame = null;
 let currentRun = null;
-let persistedRuns = [];
+let persistedSessions = [];
+let currentSessionID = "";
 const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 const colorSchemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -123,23 +126,17 @@ restoreButton.addEventListener("click", () => {
 });
 
 historyList.addEventListener("click", (event) => {
-  const item = event.target.closest("[data-run-id]");
+  const item = event.target.closest("[data-session-id]");
   if (!item) {
     return;
   }
 
-  const runID = item.dataset.runId || "";
-  if (!runID) {
+  const sessionID = item.dataset.sessionId || "";
+  if (!sessionID) {
     return;
   }
 
-  if (!findRunMessage(runID)) {
-    restoreHistory({ focusRunID: runID });
-    closeHistoryDialog();
-    return;
-  }
-
-  focusRun(runID);
+  selectSession(sessionID);
   closeHistoryDialog();
 });
 
@@ -156,11 +153,13 @@ resetButton.addEventListener("click", async () => {
   addEvent("Ready");
   setRunState(null);
   setState("Idle", "Ready", "Ready", "Ready");
-  persistedRuns = [];
-  renderHistoryPanel();
 
   try {
-    await fetch("/api/reset", { method: "POST" });
+    const response = await fetch("/api/reset", { method: "POST" });
+    if (!response.ok) {
+      throw new Error(`Reset failed: ${response.status}`);
+    }
+    applyHistory(await response.json());
   } catch {
     addEvent("Preview reset");
   }
@@ -311,16 +310,16 @@ function formatDuration(durationMS) {
 
 async function loadHistory() {
   try {
-    persistedRuns = await fetchHistory();
-    renderHistoryPanel();
-    if (persistedRuns.length === 0) {
+    applyHistory(await fetchHistory());
+    const session = currentSession();
+    if (!session || sessionRuns(session).length === 0) {
       return;
     }
     if (controller || conversation.children.length > 0) {
       return;
     }
 
-    restoreHistory();
+    restoreSession(session.session_id);
   } catch (error) {
     addEvent("History unavailable");
   }
@@ -328,8 +327,7 @@ async function loadHistory() {
 
 async function refreshHistoryPanel() {
   try {
-    persistedRuns = await fetchHistory();
-    renderHistoryPanel();
+    applyHistory(await fetchHistory());
   } catch {
     historyState.textContent = "History unavailable";
     restoreButton.disabled = true;
@@ -343,11 +341,23 @@ async function fetchHistory() {
   }
 
   const history = await response.json();
-  return Array.isArray(history.runs) ? history.runs : [];
+  return history && typeof history === "object" ? history : { sessions: [], current_session_id: "" };
 }
 
-function restoreHistory({ focusRunID = "" } = {}) {
-  if (persistedRuns.length === 0 || controller) {
+function applyHistory(history) {
+  persistedSessions = Array.isArray(history.sessions) ? history.sessions : [];
+  currentSessionID = history.current_session_id || currentSessionID || persistedSessions[persistedSessions.length - 1]?.session_id || "";
+  renderHistoryPanel();
+  renderTodosPanel();
+}
+
+function restoreHistory() {
+  restoreSession(currentSessionID);
+}
+
+function restoreSession(sessionID) {
+  const session = sessionByID(sessionID);
+  if (!session || controller) {
     return;
   }
 
@@ -358,20 +368,38 @@ function restoreHistory({ focusRunID = "" } = {}) {
 
   conversation.replaceChildren();
   followConversation = true;
-  persistedRuns.forEach(renderPersistedRun);
+  sessionRuns(session).forEach(renderPersistedRun);
 
-  const targetRun = persistedRuns.find((run) => run.run_id === focusRunID) || persistedRuns[persistedRuns.length - 1];
-  currentRun = runFromHistory(targetRun);
+  currentSessionID = session.session_id || currentSessionID;
+  const runs = sessionRuns(session);
+  currentRun = runs.length > 0 ? runFromHistory(runs[runs.length - 1]) : null;
   setRunState(currentRun);
   setState("Idle", "Ready", "Ready", "Ready");
+  renderTodosPanel();
   renderHistoryPanel();
-  addEvent(`History restored · ${persistedRuns.length} runs`);
+  addEvent(`Session restored · ${session.title || "Untitled session"}`);
+  scrollConversation();
+}
 
-  if (focusRunID) {
-    focusRun(focusRunID);
+async function selectSession(sessionID) {
+  if (!sessionID || controller) {
     return;
   }
-  scrollConversation();
+
+  try {
+    const response = await fetch("/api/session/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionID }),
+    });
+    if (!response.ok) {
+      throw new Error(`Session select failed: ${response.status}`);
+    }
+    applyHistory(await response.json());
+    restoreSession(sessionID);
+  } catch {
+    addEvent("Session unavailable");
+  }
 }
 
 function renderPersistedRun(run) {
@@ -413,32 +441,34 @@ function runFromHistory(run) {
 }
 
 function renderHistoryPanel() {
-  const runCount = persistedRuns.length;
-  historyCount.textContent = String(runCount);
-  historyButton.title = runCount === 0 ? "No saved history" : `Open ${runCount} saved ${runCount === 1 ? "run" : "runs"}`;
+  const visibleSessions = persistedSessions.filter((session) => sessionRuns(session).length > 0);
+  const sessionCount = visibleSessions.length;
+  historyCount.textContent = String(sessionCount);
+  historyButton.title = sessionCount === 0 ? "No saved sessions" : `Open ${sessionCount} saved ${sessionCount === 1 ? "session" : "sessions"}`;
   historyList.replaceChildren();
-  restoreButton.disabled = controller !== null || runCount === 0;
+  restoreButton.disabled = controller !== null || !currentSession() || sessionRuns(currentSession()).length === 0;
 
-  if (runCount === 0) {
-    historyState.textContent = "No saved runs";
+  if (sessionCount === 0) {
+    historyState.textContent = "No saved sessions";
     const empty = document.createElement("li");
     empty.className = "history-empty";
-    empty.textContent = "No saved runs yet";
+    empty.textContent = "No saved sessions yet";
     historyList.append(empty);
     return;
   }
 
-  historyState.textContent = `${runCount} ${runCount === 1 ? "run" : "runs"} saved`;
-  const activeRunID = currentRun?.id || persistedRuns[runCount - 1]?.run_id || "";
-  persistedRuns.slice().reverse().forEach((run) => {
+  historyState.textContent = `${sessionCount} ${sessionCount === 1 ? "session" : "sessions"} saved`;
+  visibleSessions.slice().reverse().forEach((session) => {
+    const runs = sessionRuns(session);
+    const lastRun = runs[runs.length - 1];
     const listItem = document.createElement("li");
     listItem.className = "history-card";
     const button = document.createElement("button");
     button.className = "history-item";
     button.type = "button";
-    button.dataset.runId = run.run_id || "";
-    button.title = run.run_id || "";
-    if (run.run_id === activeRunID) {
+    button.dataset.sessionId = session.session_id || "";
+    button.title = session.session_id || "";
+    if (session.session_id === currentSessionID) {
       listItem.classList.add("active");
     }
 
@@ -447,28 +477,31 @@ function renderHistoryPanel() {
 
     const title = document.createElement("span");
     title.className = "history-title";
-    title.textContent = run.user_message || run.run_id || "Untitled run";
+    title.textContent = session.title || lastRun?.user_message || "Untitled session";
 
     const status = document.createElement("span");
-    status.className = `history-status status-${run.status || "unknown"}`;
-    status.textContent = runStatusLabel(run.status);
+    status.className = `history-status status-${lastRun?.status || "unknown"}`;
+    const todos = sessionTodos(session);
+    const runLabel = `${runs.length} ${runs.length === 1 ? "run" : "runs"}`;
+    const todoLabel = todos.length > 0 ? ` · ${todos.length} ${todos.length === 1 ? "todo" : "todos"}` : "";
+    status.textContent = `${runLabel}${todoLabel}`;
 
     header.append(title, status);
 
     const preview = document.createElement("span");
     preview.className = "history-preview";
-    preview.textContent = historyPreview(run);
+    preview.textContent = sessionPreview(session);
 
     const footer = document.createElement("span");
     footer.className = "history-item-footer";
 
     const id = document.createElement("span");
     id.className = "history-id";
-    id.textContent = run.run_id || "";
+    id.textContent = session.session_id || "";
 
     const duration = document.createElement("span");
     duration.className = "history-duration";
-    duration.textContent = formatDuration(run.duration_ms || 0);
+    duration.textContent = sessionUpdatedLabel(session);
 
     footer.append(id, duration);
 
@@ -478,7 +511,104 @@ function renderHistoryPanel() {
   });
 }
 
-function historyPreview(run) {
+function currentSession() {
+  return sessionByID(currentSessionID);
+}
+
+function sessionByID(sessionID) {
+  return persistedSessions.find((session) => session.session_id === sessionID) || null;
+}
+
+function sessionRuns(session) {
+  return Array.isArray(session?.runs) ? session.runs : [];
+}
+
+function sessionTodos(session) {
+  return Array.isArray(session?.todos) ? session.todos : [];
+}
+
+function renderTodosPanel() {
+  const todos = sessionTodos(currentSession());
+  todoCount.textContent = String(todos.length);
+  todoList.replaceChildren();
+
+  if (todos.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "todo-empty";
+    empty.textContent = "No active plan";
+    todoList.append(empty);
+    return;
+  }
+
+  todos.forEach((todo, index) => {
+    const item = document.createElement("li");
+    item.className = `todo-item todo-${todoStatusClass(todo.status)}`;
+
+    const marker = document.createElement("span");
+    marker.className = "todo-marker";
+    marker.textContent = String(index + 1);
+
+    const body = document.createElement("span");
+    body.className = "todo-body";
+
+    const content = document.createElement("span");
+    content.className = "todo-content";
+    content.textContent = todo.content || "Untitled todo";
+
+    const meta = document.createElement("span");
+    meta.className = "todo-meta";
+    const status = todoStatusLabel(todo.status);
+    const id = todo.id ? ` · ${todo.id}` : "";
+    meta.textContent = `${status}${id}`;
+
+    body.append(content, meta);
+    item.append(marker, body);
+    todoList.append(item);
+  });
+}
+
+function todoStatusClass(status) {
+  switch (status) {
+    case "in_progress":
+      return "in-progress";
+    case "done":
+      return "done";
+    case "blocked":
+      return "blocked";
+    case "cancelled":
+      return "cancelled";
+    case "pending":
+    default:
+      return "pending";
+  }
+}
+
+function todoStatusLabel(status) {
+  switch (status) {
+    case "in_progress":
+      return "In progress";
+    case "done":
+      return "Done";
+    case "blocked":
+      return "Blocked";
+    case "cancelled":
+      return "Cancelled";
+    case "pending":
+      return "Pending";
+    default:
+      return status || "Pending";
+  }
+}
+
+function sessionPreview(session) {
+  const runs = sessionRuns(session);
+  if (runs.length === 0) {
+    return "No messages in this session yet.";
+  }
+  const run = runs[runs.length - 1];
+  if (run.user_message) {
+    return run.user_message;
+  }
   if (run.content) {
     return run.content;
   }
@@ -489,6 +619,23 @@ function historyPreview(run) {
     return "Interrupted before a final response.";
   }
   return "No final response saved.";
+}
+
+function sessionUpdatedLabel(session) {
+  const raw = session?.updated_at || "";
+  if (!raw) {
+    return "";
+  }
+  const updatedAt = new Date(raw);
+  if (Number.isNaN(updatedAt.getTime())) {
+    return raw;
+  }
+  return updatedAt.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function openHistoryDialog() {
@@ -509,31 +656,10 @@ function closeHistoryDialog() {
   historyDialog.removeAttribute("open");
 }
 
-function findRunMessage(runID) {
-  return [...conversation.querySelectorAll(".message")].find((message) => message.dataset.runId === runID) || null;
-}
-
-function focusRun(runID) {
-  const message = findRunMessage(runID);
-  const run = persistedRuns.find((item) => item.run_id === runID);
-  if (!message || !run) {
-    return;
-  }
-
-  currentRun = runFromHistory(run);
-  setRunState(currentRun);
-  renderHistoryPanel();
-  scrollToMessage(message);
-  message.classList.add("message-highlight");
-  window.setTimeout(() => {
-    message.classList.remove("message-highlight");
-  }, 1200);
-}
-
 function setRunning(isRunning) {
   sendButton.disabled = isRunning;
   resetButton.disabled = isRunning;
-  restoreButton.disabled = isRunning || persistedRuns.length === 0;
+  restoreButton.disabled = isRunning || !currentSession() || sessionRuns(currentSession()).length === 0;
   if (isRunning) {
     setState("Running", "Active", "Ready", "Writing");
     consoleStatus.textContent = "Running";
@@ -647,7 +773,7 @@ function addStreamingAssistantMessage() {
     const body = renderMarkdown("");
     section.append(heading, body);
     traceList.append(section);
-    traceItems.set(id, { content: "", body });
+    traceItems.set(id, { content: "", body, title: title || "Trace", type: type || "entry" });
     scrollConversation();
   }
 
@@ -686,6 +812,10 @@ function addStreamingAssistantMessage() {
       finalBody.innerHTML = markdownToHTML(finalContent);
       scrollConversation();
     },
+    isTodoTrace(id) {
+      const item = traceItems.get(id);
+      return item?.title === "Tool use: update_todos";
+    },
   };
 }
 
@@ -710,6 +840,10 @@ function applyStreamEvent(message, event) {
     case "trace_done":
       if (event.content) {
         message.setTrace(event.id, event.content);
+      }
+      if (message.isTodoTrace(event.id)) {
+        addEvent("Plan updated");
+        refreshHistoryPanel();
       }
       return;
     case "content_delta":

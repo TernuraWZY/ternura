@@ -17,7 +17,6 @@ import (
 
 	"ternura"
 	"ternura/shared"
-	"ternura/tool"
 )
 
 func main() {
@@ -42,12 +41,7 @@ func main() {
 		return
 	}
 
-	agent := ternura.NewAgent(modelConf, ternura.CodingAgentSystemPrompt, []tool.Tool{
-		tool.NewReadTool(),
-		tool.NewEditTool(),
-		tool.NewWriteTool(),
-		tool.NewBashTool(),
-	})
+	agent := ternura.NewAgent(modelConf, ternura.TernuraAgentSystemPrompt, newAgentTools(nil))
 	result, err := agent.RunWithTrace(ctx, *query)
 	if err != nil {
 		log.Printf("agent run error: %v", err)
@@ -100,6 +94,7 @@ func (s *agentServer) routes() http.Handler {
 	mux.HandleFunc("/api/chat", s.handleChat)
 	mux.HandleFunc("/api/chat/stream", s.handleChatStream)
 	mux.HandleFunc("/api/history", s.handleHistory)
+	mux.HandleFunc("/api/session/select", s.handleSelectSession)
 	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 	return mux
@@ -510,9 +505,37 @@ func (s *agentServer) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	snapshot := s.store.Snapshot()
-	writeHistoryJSON(w, http.StatusOK, historyResponse{
-		Runs: snapshot.Runs,
-	})
+	writeHistoryJSON(w, http.StatusOK, historyFromSnapshot(snapshot))
+}
+
+func (s *agentServer) handleSelectSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req selectSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.SessionID == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	snapshot, err := s.store.SelectSession(req.SessionID)
+	if err == nil {
+		s.resetAgentFromSnapshot(snapshot)
+	}
+	s.mu.Unlock()
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeHistoryJSON(w, http.StatusOK, historyFromSnapshot(snapshot))
 }
 
 func (s *agentServer) handleReset(w http.ResponseWriter, r *http.Request) {
@@ -522,39 +545,43 @@ func (s *agentServer) handleReset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	if err := s.store.Clear(); err != nil {
-		log.Printf("clear persisted session: %v", err)
+	snapshot, err := s.store.NewSession()
+	if err != nil {
+		log.Printf("create new session: %v", err)
 	}
 	s.resetAgent()
 	s.mu.Unlock()
 
-	writeJSON(w, http.StatusOK, chatResponse{Content: "ready"})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, chatResponse{Error: "failed to create session"})
+		return
+	}
+	writeHistoryJSON(w, http.StatusOK, historyFromSnapshot(snapshot))
 }
 
 func (s *agentServer) resetAgent() {
-	s.agent = ternura.NewAgent(s.modelConf, ternura.CodingAgentSystemPrompt, []tool.Tool{
-		tool.NewReadTool(),
-		tool.NewEditTool(),
-		tool.NewWriteTool(),
-		tool.NewBashTool(),
-	})
+	s.agent = ternura.NewAgent(s.modelConf, ternura.TernuraAgentSystemPrompt, newAgentTools(s.updateTodos))
 }
 
 func (s *agentServer) resetAgentFromHistory() {
+	s.resetAgentFromSnapshot(s.store.Snapshot())
+}
+
+func (s *agentServer) resetAgentFromSnapshot(snapshot sessionSnapshot) {
 	s.resetAgent()
-	snapshot := s.store.Snapshot()
-	if len(snapshot.Messages) == 0 {
+	session, ok := currentSessionFromSnapshot(snapshot)
+	if !ok || len(session.Messages) == 0 {
 		return
 	}
-	messages := make([]ternura.ConversationMessage, 0, len(snapshot.Messages))
-	for _, message := range snapshot.Messages {
+	messages := make([]ternura.ConversationMessage, 0, len(session.Messages))
+	for _, message := range session.Messages {
 		messages = append(messages, ternura.ConversationMessage{
 			Role:    message.Role,
 			Content: message.Content,
 		})
 	}
 	s.agent.RestoreConversation(messages)
-	log.Printf("restored %d persisted conversation messages", len(messages))
+	log.Printf("restored %d persisted conversation messages from %s", len(messages), session.SessionID)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value chatResponse) {

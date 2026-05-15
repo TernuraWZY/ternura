@@ -98,25 +98,29 @@ func TestSessionStorePersistsRunsAndConversation(t *testing.T) {
 		t.Fatalf("load store: %v", err)
 	}
 	snapshot := reloaded.Snapshot()
+	session, ok := currentSessionFromSnapshot(snapshot)
 
-	if len(snapshot.Runs) != 1 {
-		t.Fatalf("runs = %d, want 1", len(snapshot.Runs))
+	if !ok {
+		t.Fatalf("current session not found")
 	}
-	if snapshot.Runs[0].RunID != run.ID || snapshot.Runs[0].Content != "hi" {
-		t.Fatalf("run snapshot = %+v", snapshot.Runs[0])
+	if len(session.Runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(session.Runs))
 	}
-	if len(snapshot.Runs[0].Trace) != 1 || snapshot.Runs[0].Trace[0].Content != "ok" {
-		t.Fatalf("trace snapshot = %+v", snapshot.Runs[0].Trace)
+	if session.Runs[0].RunID != run.ID || session.Runs[0].Content != "hi" {
+		t.Fatalf("run snapshot = %+v", session.Runs[0])
 	}
-	if len(snapshot.Messages) != 2 {
-		t.Fatalf("messages = %d, want 2", len(snapshot.Messages))
+	if len(session.Runs[0].Trace) != 1 || session.Runs[0].Trace[0].Content != "ok" {
+		t.Fatalf("trace snapshot = %+v", session.Runs[0].Trace)
 	}
-	if snapshot.Messages[0].Role != "user" || snapshot.Messages[1].Role != "assistant" {
-		t.Fatalf("messages snapshot = %+v", snapshot.Messages)
+	if len(session.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(session.Messages))
+	}
+	if session.Messages[0].Role != "user" || session.Messages[1].Role != "assistant" {
+		t.Fatalf("messages snapshot = %+v", session.Messages)
 	}
 }
 
-func TestSessionStoreClearRemovesPersistedHistory(t *testing.T) {
+func TestSessionStoreNewSessionPreservesPreviousSession(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.json")
 	store := newSessionStore(path)
 	run := runLifecycle{ID: "run-test-0004", StartedAt: time.Now()}
@@ -124,10 +128,58 @@ func TestSessionStoreClearRemovesPersistedHistory(t *testing.T) {
 	if err := store.StartRun(run, "hello"); err != nil {
 		t.Fatalf("start run: %v", err)
 	}
-	if err := store.Clear(); err != nil {
-		t.Fatalf("clear store: %v", err)
+	firstSnapshot := store.Snapshot()
+	firstSessionID := firstSnapshot.CurrentSessionID
+
+	snapshot, err := store.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
 	}
-	if snapshot := store.Snapshot(); len(snapshot.Runs) != 0 || len(snapshot.Messages) != 0 {
-		t.Fatalf("snapshot after clear = %+v", snapshot)
+	if snapshot.CurrentSessionID == firstSessionID {
+		t.Fatalf("current session id should change")
+	}
+	if len(snapshot.Sessions) != 2 {
+		t.Fatalf("sessions = %d, want 2", len(snapshot.Sessions))
+	}
+	firstSession := findSession(snapshot.Sessions, firstSessionID)
+	if firstSession == nil || len(firstSession.Runs) != 1 {
+		t.Fatalf("first session not preserved: %+v", snapshot.Sessions)
+	}
+	currentSession, ok := currentSessionFromSnapshot(snapshot)
+	if !ok || len(currentSession.Runs) != 0 {
+		t.Fatalf("current session = %+v, want empty new session", currentSession)
+	}
+}
+
+func TestSessionStorePersistsSessionTodos(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	store := newSessionStore(path)
+
+	if _, err := store.ReplaceTodos([]persistedTodo{{
+		ID:      "todo-1",
+		Content: "Wire update_todos into the agent",
+		Status:  "in_progress",
+	}}); err != nil {
+		t.Fatalf("replace todos: %v", err)
+	}
+
+	reloaded := newSessionStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("load store: %v", err)
+	}
+	session, ok := currentSessionFromSnapshot(reloaded.Snapshot())
+	if !ok {
+		t.Fatalf("current session not found")
+	}
+	if len(session.Todos) != 1 {
+		t.Fatalf("todos = %d, want 1", len(session.Todos))
+	}
+	if session.Todos[0].Content != "Wire update_todos into the agent" {
+		t.Fatalf("todo snapshot = %+v", session.Todos[0])
+	}
+
+	history := historyFromSnapshot(reloaded.Snapshot())
+	if len(history.Sessions) != 1 || len(history.Sessions[0].Todos) != 1 {
+		t.Fatalf("history todos = %+v", history.Sessions)
 	}
 }

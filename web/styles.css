@@ -204,18 +204,147 @@ textarea {
   white-space: normal;
 }
 
+.todos-panel {
+  display: grid;
+  min-height: 0;
+  gap: 10px;
+}
+
+.todos-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .events-panel {
   display: grid;
   min-height: 0;
   gap: 10px;
 }
 
+.todos-header h2,
 .events-panel h2 {
   margin: 0;
   color: var(--muted);
   font-size: 16px;
   font-weight: 600;
   text-transform: uppercase;
+}
+
+.todo-count {
+  display: grid;
+  min-width: 26px;
+  height: 24px;
+  place-items: center;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--teal-dark);
+  background: var(--teal-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.todos-list {
+  display: grid;
+  max-height: min(28vh, 300px);
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.todo-item {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.todo-marker {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--muted);
+  background: var(--code-bg);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.todo-body {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.todo-content,
+.todo-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.todo-content {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.todo-meta {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.todo-in-progress {
+  border-left-color: var(--teal);
+  background: var(--teal-soft);
+}
+
+.todo-in-progress .todo-marker {
+  color: #fff;
+  background: var(--teal);
+}
+
+.todo-done {
+  opacity: 0.76;
+}
+
+.todo-done .todo-content {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.todo-blocked {
+  border-left-color: var(--pink);
+  background: var(--pink-soft);
+}
+
+.todo-cancelled {
+  opacity: 0.62;
+}
+
+.todo-empty {
+  min-height: 50px;
+  padding: 15px 16px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--panel);
+  font-size: 13px;
 }
 
 .restore-button {
@@ -1030,6 +1159,10 @@ textarea {
 
   .events-list {
     max-height: 140px;
+  }
+
+  .todos-list {
+    max-height: 160px;
   }
 
   .reset-button {
