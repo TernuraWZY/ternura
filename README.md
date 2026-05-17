@@ -125,13 +125,30 @@ Web Console 包含：
 
 同一轮运行中的 `start`、`content_delta`、`trace_*`、`done` 和 `error` 事件也会携带同一个 `run_id`。
 
-会话恢复数据保存在项目根目录的 `.ternura/session.json`。它包含：
+会话恢复数据保存在项目根目录的 `.ternura/`，并拆成多个文件：
 
-- `sessions`：多个历史 session，每个 session 都有独立的标题、创建/更新时间、对话消息和运行记录
-- `current_session_id`：当前正在恢复和继续对话的 session
-- `runs`：每个 session 内部的请求记录，包括 `run_id`、状态、用户输入、最终回复、原始回复、trace、错误信息和耗时
-- `messages`：每个 session 内部用于服务重启后恢复模型上下文的用户/assistant 对话历史
-- `todos`：每个 session 内部的当前任务计划，由 `update_todos` 工具维护
+```text
+.ternura/
+├── index.json
+└── sessions/
+    └── session-xxx/
+        ├── meta.json
+        ├── messages.json
+        ├── todos.json
+        └── runs/
+            ├── run-xxx.json
+            └── run-yyy.json
+```
+
+- `index.json`：当前 session id 和所有 session 的轻量摘要，包括标题、创建/更新时间、run 数量、message 数量和 todo 数量
+- `meta.json`：单个 session 的元信息和 run 顺序
+- `messages.json`：用于服务重启后恢复模型上下文的 user/assistant 对话历史
+- `todos.json`：当前 session 的任务计划，由 `update_todos` 工具维护
+- `runs/*.json`：每轮请求的详细记录，包括 `run_id`、状态、用户输入、最终回复、原始回复、trace、错误信息和耗时
+
+旧版 `.ternura/session.json` 会在启动时自动迁移到拆分结构，并移动为 `.ternura/session.legacy.json` 作为备份；后续写入只更新拆分后的文件。
+
+`/api/history` 只返回 session 摘要和最后一轮 run 的轻量预览，不再返回所有 trace；前端在恢复某个 session 时才通过 `/api/session?session_id=...` 拉取该 session 的完整 runs。
 
 `.ternura/` 已经被 `.gitignore` 忽略，不会被提交到仓库。点击 `New session` 会创建新的空 session，不会删除已有历史 session。
 

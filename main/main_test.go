@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -72,7 +74,8 @@ func TestApplyRunFieldsDecoratesJSONResponse(t *testing.T) {
 }
 
 func TestSessionStorePersistsRunsAndConversation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "session.json")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.json")
 	store := newSessionStore(path)
 	startedAt := time.Date(2026, 5, 15, 8, 30, 0, 0, time.UTC)
 	finishedAt := startedAt.Add(2 * time.Second)
@@ -117,6 +120,25 @@ func TestSessionStorePersistsRunsAndConversation(t *testing.T) {
 	}
 	if session.Messages[0].Role != "user" || session.Messages[1].Role != "assistant" {
 		t.Fatalf("messages snapshot = %+v", session.Messages)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, sessionIndexFileName)); err != nil {
+		t.Fatalf("index file not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sessionsDirName, session.SessionID, sessionMetaFileName)); err != nil {
+		t.Fatalf("session meta file not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sessionsDirName, session.SessionID, sessionMessagesFileName)); err != nil {
+		t.Fatalf("messages file not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sessionsDirName, session.SessionID, sessionTodosFileName)); err != nil {
+		t.Fatalf("todos file not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sessionsDirName, session.SessionID, sessionRunsDirName, run.ID+sessionRunFileExtension)); err != nil {
+		t.Fatalf("run file not written: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("legacy session file should not be written, err=%v", err)
 	}
 }
 
@@ -181,5 +203,73 @@ func TestSessionStorePersistsSessionTodos(t *testing.T) {
 	history := historyFromSnapshot(reloaded.Snapshot())
 	if len(history.Sessions) != 1 || len(history.Sessions[0].Todos) != 1 {
 		t.Fatalf("history todos = %+v", history.Sessions)
+	}
+}
+
+func TestSessionStoreMigratesLegacySnapshotFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.json")
+	startedAt := time.Date(2026, 5, 15, 8, 30, 0, 0, time.UTC)
+	finishedAt := startedAt.Add(time.Second)
+	legacy := sessionSnapshot{
+		Version:          2,
+		CurrentSessionID: "session-legacy",
+		Sessions: []persistedSession{{
+			SessionID: "session-legacy",
+			Title:     "Legacy",
+			CreatedAt: startedAt.Format(time.RFC3339Nano),
+			UpdatedAt: finishedAt.Format(time.RFC3339Nano),
+			Messages: []persistedMessage{
+				{Role: "user", Content: "legacy question"},
+				{Role: "assistant", Content: "legacy answer"},
+			},
+			Runs: []persistedRun{{
+				RunID:       "run-legacy",
+				Status:      runStatusSucceeded,
+				UserMessage: "legacy question",
+				Content:     "legacy answer",
+				StartedAt:   startedAt.Format(time.RFC3339Nano),
+				FinishedAt:  finishedAt.Format(time.RFC3339Nano),
+				DurationMS:  1000,
+			}},
+			Todos: []persistedTodo{{
+				ID:      "todo-legacy",
+				Content: "Migrate legacy store",
+				Status:  "done",
+			}},
+		}},
+	}
+	payload, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy: %v", err)
+	}
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	store := newSessionStore(path)
+	if err := store.Load(); err != nil {
+		t.Fatalf("load migrated store: %v", err)
+	}
+
+	snapshot := store.Snapshot()
+	session, ok := currentSessionFromSnapshot(snapshot)
+	if !ok {
+		t.Fatalf("current session not found")
+	}
+	if session.SessionID != "session-legacy" || len(session.Runs) != 1 || len(session.Messages) != 2 || len(session.Todos) != 1 {
+		t.Fatalf("migrated session = %+v", session)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sessionIndexFileName)); err != nil {
+		t.Fatalf("index file not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sessionsDirName, "session-legacy", sessionRunsDirName, "run-legacy"+sessionRunFileExtension)); err != nil {
+		t.Fatalf("run file not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sessionLegacyBackupName)); err != nil {
+		t.Fatalf("legacy backup not written: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("legacy session file should be moved, err=%v", err)
 	}
 }

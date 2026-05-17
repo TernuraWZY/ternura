@@ -94,6 +94,7 @@ func (s *agentServer) routes() http.Handler {
 	mux.HandleFunc("/api/chat", s.handleChat)
 	mux.HandleFunc("/api/chat/stream", s.handleChatStream)
 	mux.HandleFunc("/api/history", s.handleHistory)
+	mux.HandleFunc("/api/session", s.handleSessionDetail)
 	mux.HandleFunc("/api/session/select", s.handleSelectSession)
 	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.Handle("/", noCache(http.FileServer(http.Dir("web"))))
@@ -515,6 +516,21 @@ func (s *agentServer) handleHistory(w http.ResponseWriter, r *http.Request) {
 	writeHistoryJSON(w, http.StatusOK, historyFromSnapshot(snapshot))
 }
 
+func (s *agentServer) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	snapshot := s.store.Snapshot()
+	detail, err := sessionDetailFromSnapshot(snapshot, r.URL.Query().Get("session_id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeSessionDetailJSON(w, http.StatusOK, detail)
+}
+
 func (s *agentServer) handleSelectSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -604,6 +620,14 @@ func writeHistoryJSON(w http.ResponseWriter, status int, value historyResponse) 
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		log.Printf("write history response: %v", err)
+	}
+}
+
+func writeSessionDetailJSON(w http.ResponseWriter, status int, value sessionDetailResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		log.Printf("write session detail response: %v", err)
 	}
 }
 

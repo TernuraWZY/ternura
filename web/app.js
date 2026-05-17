@@ -33,6 +33,7 @@ let followConversation = true;
 let scrollFrame = null;
 let currentRun = null;
 let persistedSessions = [];
+const sessionDetails = new Map();
 let currentSessionID = "";
 let promptInputComposing = false;
 let promptInputLastCompositionAt = 0;
@@ -114,6 +115,9 @@ async function submitPrompt() {
   } finally {
     controller = null;
     setRunning(false);
+    if (currentSessionID) {
+      sessionDetails.delete(currentSessionID);
+    }
     await refreshHistoryPanel();
   }
 }
@@ -133,12 +137,12 @@ historyDialog.addEventListener("click", (event) => {
   }
 });
 
-restoreButton.addEventListener("click", () => {
-  restoreHistory();
+restoreButton.addEventListener("click", async () => {
+  await restoreHistory();
   closeHistoryDialog();
 });
 
-historyList.addEventListener("click", (event) => {
+historyList.addEventListener("click", async (event) => {
   const item = event.target.closest("[data-session-id]");
   if (!item) {
     return;
@@ -149,7 +153,7 @@ historyList.addEventListener("click", (event) => {
     return;
   }
 
-  selectSession(sessionID);
+  await selectSession(sessionID);
   closeHistoryDialog();
 });
 
@@ -375,14 +379,14 @@ async function loadHistory() {
   try {
     applyHistory(await fetchHistory());
     const session = currentSession();
-    if (!session || sessionRuns(session).length === 0) {
+    if (!session || sessionRunCount(session) === 0) {
       return;
     }
     if (controller || conversation.children.length > 0) {
       return;
     }
 
-    restoreSession(session.session_id);
+    await restoreSession(session.session_id);
   } catch (error) {
     addEvent("History unavailable");
   }
@@ -407,19 +411,43 @@ async function fetchHistory() {
   return history && typeof history === "object" ? history : { sessions: [], current_session_id: "" };
 }
 
+async function fetchSessionDetail(sessionID) {
+  const query = sessionID ? `?session_id=${encodeURIComponent(sessionID)}` : "";
+  const response = await fetch(`/api/session${query}`);
+  if (!response.ok) {
+    throw new Error(`Session detail request failed: ${response.status}`);
+  }
+
+  const detail = await response.json();
+  return detail && typeof detail === "object" ? detail : { session: null, current_session_id: "" };
+}
+
 function applyHistory(history) {
-  persistedSessions = Array.isArray(history.sessions) ? history.sessions : [];
+  const sessions = Array.isArray(history.sessions) ? history.sessions : [];
+  persistedSessions = sessions.map((session) => {
+    const cached = sessionDetails.get(session.session_id || "");
+    if (cached && hasCompleteSessionDetail(cached, session)) {
+      return {
+        ...cached,
+        ...session,
+        runs: cached.runs,
+        last_run: session.last_run || cached.last_run,
+        todos: session.todos || cached.todos,
+      };
+    }
+    return session;
+  });
   currentSessionID = history.current_session_id || currentSessionID || persistedSessions[persistedSessions.length - 1]?.session_id || "";
   renderHistoryPanel();
   renderTodosPanel();
 }
 
-function restoreHistory() {
-  restoreSession(currentSessionID);
+async function restoreHistory() {
+  await restoreSession(currentSessionID);
 }
 
-function restoreSession(sessionID) {
-  const session = sessionByID(sessionID);
+async function restoreSession(sessionID) {
+  const session = await ensureSessionDetail(sessionID);
   if (!session || controller) {
     return;
   }
@@ -459,10 +487,37 @@ async function selectSession(sessionID) {
       throw new Error(`Session select failed: ${response.status}`);
     }
     applyHistory(await response.json());
-    restoreSession(sessionID);
+    await restoreSession(sessionID);
   } catch {
     addEvent("Session unavailable");
   }
+}
+
+async function ensureSessionDetail(sessionID) {
+  const session = sessionByID(sessionID);
+  if (!session || hasCompleteSessionDetail(session, session)) {
+    return session;
+  }
+
+  const detail = await fetchSessionDetail(sessionID);
+  if (detail.current_session_id) {
+    currentSessionID = detail.current_session_id;
+  }
+  if (!detail.session) {
+    return sessionByID(sessionID);
+  }
+  mergeSessionDetail(detail.session);
+  renderHistoryPanel();
+  renderTodosPanel();
+  return sessionByID(sessionID);
+}
+
+function mergeSessionDetail(session) {
+  if (!session?.session_id) {
+    return;
+  }
+  sessionDetails.set(session.session_id, session);
+  persistedSessions = persistedSessions.map((item) => item.session_id === session.session_id ? { ...item, ...session } : item);
 }
 
 function renderPersistedRun(run) {
@@ -504,12 +559,12 @@ function runFromHistory(run) {
 }
 
 function renderHistoryPanel() {
-  const visibleSessions = persistedSessions.filter((session) => sessionRuns(session).length > 0);
+  const visibleSessions = persistedSessions.filter((session) => sessionRunCount(session) > 0);
   const sessionCount = visibleSessions.length;
   historyCount.textContent = String(sessionCount);
   historyButton.title = sessionCount === 0 ? "No saved sessions" : `Open ${sessionCount} saved ${sessionCount === 1 ? "session" : "sessions"}`;
   historyList.replaceChildren();
-  restoreButton.disabled = controller !== null || !currentSession() || sessionRuns(currentSession()).length === 0;
+  restoreButton.disabled = controller !== null || !currentSession() || sessionRunCount(currentSession()) === 0;
 
   if (sessionCount === 0) {
     historyState.textContent = "No saved sessions";
@@ -522,8 +577,8 @@ function renderHistoryPanel() {
 
   historyState.textContent = `${sessionCount} ${sessionCount === 1 ? "session" : "sessions"} saved`;
   visibleSessions.slice().reverse().forEach((session) => {
-    const runs = sessionRuns(session);
-    const lastRun = runs[runs.length - 1];
+    const runCount = sessionRunCount(session);
+    const lastRun = sessionLastRun(session);
     const listItem = document.createElement("li");
     listItem.className = "history-card";
     const button = document.createElement("button");
@@ -545,7 +600,7 @@ function renderHistoryPanel() {
     const status = document.createElement("span");
     status.className = `history-status status-${lastRun?.status || "unknown"}`;
     const todos = sessionTodos(session);
-    const runLabel = `${runs.length} ${runs.length === 1 ? "run" : "runs"}`;
+    const runLabel = `${runCount} ${runCount === 1 ? "run" : "runs"}`;
     const todoLabel = todos.length > 0 ? ` · ${todos.length} ${todos.length === 1 ? "todo" : "todos"}` : "";
     status.textContent = `${runLabel}${todoLabel}`;
 
@@ -586,8 +641,30 @@ function sessionRuns(session) {
   return Array.isArray(session?.runs) ? session.runs : [];
 }
 
+function sessionRunCount(session) {
+  const count = Number(session?.run_count);
+  return Number.isFinite(count) ? count : sessionRuns(session).length;
+}
+
+function sessionLastRun(session) {
+  const runs = sessionRuns(session);
+  if (runs.length > 0) {
+    return runs[runs.length - 1];
+  }
+  return session?.last_run || null;
+}
+
 function sessionTodos(session) {
   return Array.isArray(session?.todos) ? session.todos : [];
+}
+
+function hasCompleteSessionDetail(detailSession, summarySession) {
+  if (!detailSession) {
+    return false;
+  }
+  const detailRuns = sessionRuns(detailSession);
+  const expectedRuns = sessionRunCount(summarySession);
+  return Array.isArray(detailSession.runs) && detailRuns.length >= expectedRuns;
 }
 
 function renderTodosPanel() {
@@ -664,11 +741,13 @@ function todoStatusLabel(status) {
 }
 
 function sessionPreview(session) {
-  const runs = sessionRuns(session);
-  if (runs.length === 0) {
+  if (sessionRunCount(session) === 0) {
     return "No messages in this session yet.";
   }
-  const run = runs[runs.length - 1];
+  const run = sessionLastRun(session);
+  if (!run) {
+    return "Session details are available on restore.";
+  }
   if (run.user_message) {
     return run.user_message;
   }
