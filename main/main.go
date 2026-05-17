@@ -96,8 +96,15 @@ func (s *agentServer) routes() http.Handler {
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/api/session/select", s.handleSelectSession)
 	mux.HandleFunc("/api/reset", s.handleReset)
-	mux.Handle("/", http.FileServer(http.Dir("web")))
+	mux.Handle("/", noCache(http.FileServer(http.Dir("web"))))
 	return mux
+}
+
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *agentServer) handleChat(w http.ResponseWriter, r *http.Request) {

@@ -25,6 +25,7 @@ const AUTO_SCROLL_THRESHOLD = 220;
 const THEME_STORAGE_KEY = "ternura-theme";
 const LIGHT_THEME = "light";
 const DARK_THEME = "dark";
+const COMPOSITION_SETTLE_MS = 150;
 
 let controller = null;
 let eventCount = 1;
@@ -33,6 +34,9 @@ let scrollFrame = null;
 let currentRun = null;
 let persistedSessions = [];
 let currentSessionID = "";
+let promptInputComposing = false;
+let promptInputLastCompositionAt = 0;
+let promptInputCompositionSettlingUntil = 0;
 const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 const colorSchemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -53,9 +57,18 @@ conversation.addEventListener("scroll", () => {
   followConversation = isConversationNearBottom();
 }, { passive: true });
 
-composer.addEventListener("submit", async (event) => {
+composer.addEventListener("submit", (event) => {
   event.preventDefault();
+});
 
+sendButton.addEventListener("click", (event) => {
+  if (!isIntentionalSendActivation(event)) {
+    return;
+  }
+  submitPrompt();
+});
+
+async function submitPrompt() {
   const message = promptInput.value.trim();
   if (!message || controller) {
     return;
@@ -103,7 +116,7 @@ composer.addEventListener("submit", async (event) => {
     setRunning(false);
     await refreshHistoryPanel();
   }
-});
+}
 
 historyButton.addEventListener("click", async () => {
   await refreshHistoryPanel();
@@ -171,14 +184,47 @@ stopButton.addEventListener("click", () => {
   }
 });
 
-promptInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    composer.requestSubmit();
-    return;
-  }
+promptInput.addEventListener("compositionstart", () => {
+  markPromptInputComposing();
+});
 
+promptInput.addEventListener("compositionupdate", () => {
+  markPromptInputComposing();
+});
+
+promptInput.addEventListener("beforeinput", (event) => {
+  if (event.isComposing || event.inputType === "insertCompositionText") {
+    markPromptInputComposing();
+  }
+});
+
+promptInput.addEventListener("input", (event) => {
+  if (event.isComposing || event.inputType === "insertCompositionText") {
+    markPromptInputComposing();
+  }
+});
+
+promptInput.addEventListener("compositionend", () => {
+  promptInputComposing = false;
+  promptInputCompositionSettlingUntil = window.performance.now() + COMPOSITION_SETTLE_MS;
+});
+
+promptInput.addEventListener("blur", () => {
+  promptInputComposing = false;
+  promptInputCompositionSettlingUntil = 0;
+});
+
+function markPromptInputComposing() {
+  promptInputComposing = true;
+  promptInputLastCompositionAt = window.performance.now();
+  promptInputCompositionSettlingUntil = 0;
+}
+
+promptInput.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    if (isComposingShortcutEvent(event)) {
+      return;
+    }
     event.preventDefault();
     if (controller) {
       controller.abort();
@@ -213,6 +259,23 @@ function writeStoredTheme(theme) {
   } catch {
     // Theme switching should keep working even when storage is blocked.
   }
+}
+
+function isComposingShortcutEvent(event) {
+  if (event.key !== "Escape") {
+    return promptInputComposing || event.isComposing || event.keyCode === 229;
+  }
+
+  const now = window.performance.now();
+  return promptInputComposing ||
+    event.isComposing ||
+    event.keyCode === 229 ||
+    now < promptInputCompositionSettlingUntil ||
+    (promptInputLastCompositionAt > 0 && now - promptInputLastCompositionAt < COMPOSITION_SETTLE_MS);
+}
+
+function isIntentionalSendActivation(event) {
+  return event.detail > 0 || document.activeElement === sendButton;
 }
 
 function applyTheme(theme, persist) {
