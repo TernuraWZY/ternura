@@ -22,6 +22,7 @@ type Agent struct {
 	client       openai.Client
 	messages     []openai.ChatCompletionMessageParamUnion
 	tools        map[tool.AgentTool]tool.Tool
+	hooks        *HookManager
 }
 
 type AgentRunResult struct {
@@ -58,16 +59,40 @@ type AgentStreamEvent struct {
 	Error      string           `json:"error,omitempty"`
 }
 
-func NewAgent(modelConf shared.ModelConfig, systemPrompt string, tools []tool.Tool) *Agent {
+type AgentOption func(*Agent)
+
+func WithHooks(hooks ...Hook) AgentOption {
+	return func(a *Agent) {
+		a.hooks = NewHookManager(hooks...)
+	}
+}
+
+func WithHookManager(manager *HookManager) AgentOption {
+	return func(a *Agent) {
+		if manager == nil {
+			a.hooks = NewHookManager()
+			return
+		}
+		a.hooks = manager
+	}
+}
+
+func NewAgent(modelConf shared.ModelConfig, systemPrompt string, tools []tool.Tool, opts ...AgentOption) *Agent {
 	a := Agent{
 		systemPrompt: systemPrompt,
 		model:        modelConf.Model,
 		client:       openai.NewClient(option.WithBaseURL(modelConf.BaseURL), option.WithAPIKey(modelConf.ApiKey)),
 		tools:        make(map[tool.AgentTool]tool.Tool),
 		messages:     make([]openai.ChatCompletionMessageParamUnion, 0),
+		hooks:        NewHookManager(),
 	}
 	for _, t := range tools {
 		a.tools[t.ToolName()] = t
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&a)
+		}
 	}
 	a.messages = append(a.messages, openai.SystemMessage(systemPrompt))
 	return &a
@@ -94,6 +119,36 @@ func (a *Agent) execute(ctx context.Context, toolName string, argumentsInJSON st
 	return t.Execute(ctx, argumentsInJSON)
 }
 
+func (a *Agent) executeTool(ctx context.Context, runCtx *RunContext, call ToolCall) ToolResult {
+	if runCtx != nil {
+		runCtx.ToolCallCount++
+	}
+
+	if err := a.hooks.BeforeToolCall(ctx, runCtx, &call); err != nil {
+		return ToolResult{
+			Call:    call,
+			Content: err.Error(),
+			Err:     err,
+		}
+	}
+
+	content, err := a.execute(ctx, call.Name, call.Arguments)
+	if err != nil {
+		content = err.Error()
+	}
+	result := ToolResult{
+		Call:    call,
+		Content: content,
+		Err:     err,
+	}
+
+	if err := a.hooks.AfterToolCall(ctx, runCtx, &result); err != nil {
+		result.Err = err
+		result.Content = err.Error()
+	}
+	return result
+}
+
 // Run 提供对于单次用户请求 query 的 tool loop，返回本轮结果的输出。Run 会保持当前对话历史，不同主题的对话轮次应该初始化多个 Agent 实例运行。
 func (a *Agent) Run(ctx context.Context, query string) (string, error) {
 	result, err := a.RunWithTrace(ctx, query)
@@ -104,14 +159,31 @@ func (a *Agent) Run(ctx context.Context, query string) (string, error) {
 }
 
 // RunWithTrace 提供单次用户请求 query 的 tool loop，返回最终内容和本轮的 think/tool trace。
-func (a *Agent) RunWithTrace(ctx context.Context, query string) (AgentRunResult, error) {
-	a.messages = append(a.messages, openai.UserMessage(query))
+func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRunResult, runErr error) {
+	runCtx := NewRunContext(query, RunModeSync)
+	if err := a.hooks.BeforeRun(ctx, runCtx); err != nil {
+		return result, err
+	}
+	defer func() {
+		if err := a.hooks.AfterRun(ctx, runCtx, result, runErr); err != nil && runErr == nil {
+			runErr = err
+		}
+	}()
 
-	result := AgentRunResult{
+	a.messages = append(a.messages, openai.UserMessage(query))
+	if err := a.hooks.AfterUserMessage(ctx, runCtx); err != nil {
+		return result, err
+	}
+
+	result = AgentRunResult{
 		Trace: make([]AgentTraceItem, 0),
 	}
 	for {
-		params := a.newChatCompletionParams()
+		runCtx.ModelCallCount++
+		if err := a.hooks.BeforeModelCall(ctx, runCtx); err != nil {
+			return result, err
+		}
+		params := a.newChatCompletionParams(runCtx)
 
 		log.Printf("calling llm model %s...", a.model)
 		resp, err := a.client.Chat.Completions.New(ctx, params)
@@ -127,6 +199,21 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (AgentRunResult,
 		// 拼接 assistant message 到整体消息链中
 		a.messages = append(a.messages, message.ToParam())
 		appendThinkTrace(&result, message.Content)
+		modelResponse := ModelResponse{
+			Content:    message.Content,
+			RawContent: message.Content,
+			ToolCalls:  make([]ToolCall, 0, len(message.ToolCalls)),
+		}
+		for _, toolCall := range message.ToolCalls {
+			modelResponse.ToolCalls = append(modelResponse.ToolCalls, ToolCall{
+				ID:        toolCall.ID,
+				Name:      toolCall.Function.Name,
+				Arguments: toolCall.Function.Arguments,
+			})
+		}
+		if err := a.hooks.AfterModelResponse(ctx, runCtx, modelResponse); err != nil {
+			return result, err
+		}
 
 		// tool loop 结束，可以返回结果
 		if len(message.ToolCalls) == 0 {
@@ -136,31 +223,39 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (AgentRunResult,
 		}
 
 		for _, toolCall := range message.ToolCalls {
-			toolResult, err := a.execute(ctx, toolCall.Function.Name, toolCall.Function.Arguments)
-			traceItem := AgentTraceItem{
-				Type:  "tool",
-				Title: fmt.Sprintf("Tool use: %s", toolCall.Function.Name),
-			}
-			if err != nil {
-				toolResult = err.Error()
-				traceItem.Content = formatToolTrace(toolCall.Function.Arguments, toolResult, err)
-			} else {
-				traceItem.Content = formatToolTrace(toolCall.Function.Arguments, toolResult, nil)
-			}
+			toolResult := a.executeTool(ctx, runCtx, ToolCall{
+				ID:        toolCall.ID,
+				Name:      toolCall.Function.Name,
+				Arguments: toolCall.Function.Arguments,
+			})
+			traceItem := toolTraceFromResult(toolResult)
 			result.Trace = append(result.Trace, traceItem)
-			log.Printf("tool call %s, arguments %s, error: %v", toolCall.Function.Name, toolCall.Function.Arguments, err)
+			log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Name, toolResult.Call.Arguments, toolResult.Err)
 			// 返回 tool message 到整体消息链中
-			a.messages = append(a.messages, openai.ToolMessage(toolResult, toolCall.ID))
+			a.messages = append(a.messages, openai.ToolMessage(toolResult.Content, toolResult.Call.ID))
 		}
 
 	}
 	return result, nil
 }
 
-func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentStreamEvent) error) (AgentRunResult, error) {
-	a.messages = append(a.messages, openai.UserMessage(query))
+func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentStreamEvent) error) (result AgentRunResult, runErr error) {
+	runCtx := NewRunContext(query, RunModeStreaming)
+	if err := a.hooks.BeforeRun(ctx, runCtx); err != nil {
+		return result, err
+	}
+	defer func() {
+		if err := a.hooks.AfterRun(ctx, runCtx, result, runErr); err != nil && runErr == nil {
+			runErr = err
+		}
+	}()
 
-	result := AgentRunResult{
+	a.messages = append(a.messages, openai.UserMessage(query))
+	if err := a.hooks.AfterUserMessage(ctx, runCtx); err != nil {
+		return result, err
+	}
+
+	result = AgentRunResult{
 		Trace: make([]AgentTraceItem, 0),
 	}
 	traceIndex := 0
@@ -170,7 +265,11 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 	}
 
 	for {
-		params := a.newChatCompletionParams()
+		runCtx.ModelCallCount++
+		if err := a.hooks.BeforeModelCall(ctx, runCtx); err != nil {
+			return result, err
+		}
+		params := a.newChatCompletionParams(runCtx)
 		toolMessages := make([]openai.ChatCompletionMessageParamUnion, 0)
 		executedToolCalls := make(map[string]bool)
 
@@ -215,13 +314,18 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 				if err := contentRouter.Flush(); err != nil {
 					return result, err
 				}
-				toolTrace, toolResult := a.executeToolWithTrace(ctx, toolCall.Name, toolCall.Arguments)
+				toolResult := a.executeTool(ctx, runCtx, ToolCall{
+					ID:        toolCall.ID,
+					Name:      toolCall.Name,
+					Arguments: toolCall.Arguments,
+				})
+				toolTrace := toolTraceFromResult(toolResult)
 				result.Trace = append(result.Trace, toolTrace)
 				if err := emitTraceItem(emit, newTraceID(), toolTrace); err != nil {
 					return result, err
 				}
-				log.Printf("tool call %s, arguments %s", toolCall.Name, toolCall.Arguments)
-				toolMessages = append(toolMessages, openai.ToolMessage(toolResult, toolCall.ID))
+				log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Name, toolResult.Call.Arguments, toolResult.Err)
+				toolMessages = append(toolMessages, openai.ToolMessage(toolResult.Content, toolResult.Call.ID))
 				executedToolCalls[toolCall.ID] = true
 			}
 		}
@@ -240,6 +344,21 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 
 		message := acc.Choices[0].Message
 		a.messages = append(a.messages, message.ToParam())
+		modelResponse := ModelResponse{
+			Content:    message.Content,
+			RawContent: result.RawContent,
+			ToolCalls:  make([]ToolCall, 0, len(message.ToolCalls)),
+		}
+		for _, toolCall := range message.ToolCalls {
+			modelResponse.ToolCalls = append(modelResponse.ToolCalls, ToolCall{
+				ID:        toolCall.ID,
+				Name:      toolCall.Function.Name,
+				Arguments: toolCall.Function.Arguments,
+			})
+		}
+		if err := a.hooks.AfterModelResponse(ctx, runCtx, modelResponse); err != nil {
+			return result, err
+		}
 
 		if len(message.ToolCalls) == 0 {
 			result.Content = strings.TrimSpace(result.Content)
@@ -258,45 +377,70 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 			if executedToolCalls[toolCall.ID] {
 				continue
 			}
-			toolTrace, toolResult := a.executeToolWithTrace(ctx, toolCall.Function.Name, toolCall.Function.Arguments)
+			toolResult := a.executeTool(ctx, runCtx, ToolCall{
+				ID:        toolCall.ID,
+				Name:      toolCall.Function.Name,
+				Arguments: toolCall.Function.Arguments,
+			})
+			toolTrace := toolTraceFromResult(toolResult)
 			result.Trace = append(result.Trace, toolTrace)
 			if err := emitTraceItem(emit, newTraceID(), toolTrace); err != nil {
 				return result, err
 			}
-			log.Printf("tool call %s, arguments %s", toolCall.Function.Name, toolCall.Function.Arguments)
-			toolMessages = append(toolMessages, openai.ToolMessage(toolResult, toolCall.ID))
+			log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Name, toolResult.Call.Arguments, toolResult.Err)
+			toolMessages = append(toolMessages, openai.ToolMessage(toolResult.Content, toolResult.Call.ID))
 		}
 		a.messages = append(a.messages, toolMessages...)
 	}
 }
 
-func (a *Agent) newChatCompletionParams() openai.ChatCompletionNewParams {
+func (a *Agent) newChatCompletionParams(runCtx *RunContext) openai.ChatCompletionNewParams {
 	params := openai.ChatCompletionNewParams{
 		Model:             a.model,
-		Messages:          a.messages,
+		Messages:          a.messagesWithRuntimeContext(runCtx),
 		Tools:             make([]openai.ChatCompletionToolUnionParam, 0),
 		ParallelToolCalls: openai.Bool(false),
 	}
 
 	for _, t := range a.tools {
+		if runCtx != nil {
+			if _, disabled := runCtx.ToolDisabled(t.ToolName()); disabled {
+				continue
+			}
+		}
 		params.Tools = append(params.Tools, t.Info())
 	}
 	return params
 }
 
-func (a *Agent) executeToolWithTrace(ctx context.Context, name string, arguments string) (AgentTraceItem, string) {
-	toolResult, err := a.execute(ctx, name, arguments)
-	traceItem := AgentTraceItem{
-		Type:  "tool",
-		Title: fmt.Sprintf("Tool use: %s", name),
+func (a *Agent) messagesWithRuntimeContext(runCtx *RunContext) []openai.ChatCompletionMessageParamUnion {
+	runtimeContext := ""
+	if runCtx != nil {
+		runtimeContext = runCtx.RuntimeContextText()
 	}
-	if err != nil {
-		toolResult = err.Error()
-		traceItem.Content = formatToolTrace(arguments, toolResult, err)
-	} else {
-		traceItem.Content = formatToolTrace(arguments, toolResult, nil)
+
+	if runtimeContext == "" {
+		return a.messages
 	}
-	return traceItem, toolResult
+
+	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(a.messages)+1)
+	if len(a.messages) == 0 {
+		messages = append(messages, openai.SystemMessage(a.systemPrompt))
+		messages = append(messages, openai.SystemMessage(runtimeContext))
+		return messages
+	}
+	messages = append(messages, a.messages[0])
+	messages = append(messages, openai.SystemMessage(runtimeContext))
+	messages = append(messages, a.messages[1:]...)
+	return messages
+}
+
+func toolTraceFromResult(result ToolResult) AgentTraceItem {
+	return AgentTraceItem{
+		Type:    "tool",
+		Title:   fmt.Sprintf("Tool use: %s", result.Call.Name),
+		Content: formatToolTrace(result.Call.Arguments, result.Content, result.Err),
+	}
 }
 
 func emitTraceItem(emit func(AgentStreamEvent) error, id string, item AgentTraceItem) error {
