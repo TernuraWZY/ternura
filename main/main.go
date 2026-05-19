@@ -41,7 +41,7 @@ func main() {
 		return
 	}
 
-	agent := ternura.NewAgent(modelConf, ternura.TernuraAgentSystemPrompt, newAgentTools(nil))
+	agent := ternura.NewAgent(modelConf, ternura.TernuraAgentSystemPrompt, newAgentTools(nil, nil, nil))
 	result, err := agent.RunWithTrace(ctx, *query)
 	if err != nil {
 		log.Printf("agent run error: %v", err)
@@ -59,10 +59,15 @@ type agentServer struct {
 	mu        sync.Mutex
 	agent     *ternura.Agent
 	store     *sessionStore
+	memory    *memoryStore
 }
 
 type chatRequest struct {
 	Message string `json:"message"`
+}
+
+type memoryDeleteRequest struct {
+	ID string `json:"id"`
 }
 
 type chatResponse struct {
@@ -82,6 +87,7 @@ func newAgentServer(modelConf shared.ModelConfig) *agentServer {
 		modelConf: modelConf,
 		store:     newSessionStore(defaultSessionPath),
 	}
+	s.memory = newMemoryStore(s.store.root)
 	if err := s.store.Load(); err != nil {
 		log.Printf("load persisted session: %v", err)
 	}
@@ -94,6 +100,8 @@ func (s *agentServer) routes() http.Handler {
 	mux.HandleFunc("/api/chat", s.handleChat)
 	mux.HandleFunc("/api/chat/stream", s.handleChatStream)
 	mux.HandleFunc("/api/history", s.handleHistory)
+	mux.HandleFunc("/api/memory", s.handleMemory)
+	mux.HandleFunc("/api/memory/status", s.handleMemoryStatus)
 	mux.HandleFunc("/api/session", s.handleSessionDetail)
 	mux.HandleFunc("/api/session/select", s.handleSelectSession)
 	mux.HandleFunc("/api/reset", s.handleReset)
@@ -531,6 +539,57 @@ func (s *agentServer) handleSessionDetail(w http.ResponseWriter, r *http.Request
 	writeSessionDetailJSON(w, http.StatusOK, detail)
 }
 
+func (s *agentServer) handleMemoryStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		sessionID = s.store.CurrentSessionID()
+	}
+	status, err := s.memory.Status(sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeMemoryStatusJSON(w, http.StatusOK, status)
+}
+
+func (s *agentServer) handleMemory(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		sessionID := r.URL.Query().Get("session_id")
+		if sessionID == "" {
+			sessionID = s.store.CurrentSessionID()
+		}
+		detail, err := s.memory.Detail(sessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeMemoryDetailJSON(w, http.StatusOK, detail)
+	case http.MethodDelete:
+		var req memoryDeleteRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if err := s.memory.Forget(r.Context(), req.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		status, err := s.memory.Status(s.store.CurrentSessionID())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeMemoryStatusJSON(w, http.StatusOK, status)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *agentServer) handleSelectSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -583,7 +642,12 @@ func (s *agentServer) handleReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *agentServer) resetAgent() {
-	s.agent = ternura.NewAgent(s.modelConf, ternura.TernuraAgentSystemPrompt, newAgentTools(s.updateTodos))
+	s.agent = ternura.NewAgent(
+		s.modelConf,
+		ternura.TernuraAgentSystemPrompt,
+		newAgentTools(s.updateTodos, s.rememberMemory, s.forgetMemory),
+		ternura.WithHooks(newMemoryHook(s.memory, s.store.CurrentSessionID)),
+	)
 }
 
 func (s *agentServer) resetAgentFromHistory() {
@@ -628,6 +692,22 @@ func writeSessionDetailJSON(w http.ResponseWriter, status int, value sessionDeta
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		log.Printf("write session detail response: %v", err)
+	}
+}
+
+func writeMemoryStatusJSON(w http.ResponseWriter, status int, value memoryStatusResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		log.Printf("write memory status response: %v", err)
+	}
+}
+
+func writeMemoryDetailJSON(w http.ResponseWriter, status int, value memoryDetailResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		log.Printf("write memory detail response: %v", err)
 	}
 }
 

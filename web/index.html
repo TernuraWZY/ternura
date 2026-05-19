@@ -49,10 +49,10 @@
             <span>Context</span>
             <strong id="contextState">Ready</strong>
           </div>
-          <div class="status-row">
+          <button id="memoryButton" class="status-row memory-status-button" type="button" title="Open memory" aria-label="Open memory">
             <span>Memory</span>
             <strong id="memoryState">Ready</strong>
-          </div>
+          </button>
         </section>
 
         <section class="todos-panel" aria-label="Current plan">
@@ -127,6 +127,35 @@
       </section>
     </dialog>
 
-    <script src="./app.js?v=20260518-split-sessions"></script>
+    <dialog id="memoryDialog" class="memory-dialog" aria-labelledby="memoryDialogTitle">
+      <section class="memory-dialog-card">
+        <header class="memory-dialog-header">
+          <div>
+            <h2 id="memoryDialogTitle">Memory</h2>
+            <p id="memoryDialogState" class="memory-dialog-state">No memory loaded</p>
+          </div>
+          <button id="memoryCloseButton" class="history-close-button" type="button" title="Close memory" aria-label="Close memory">×</button>
+        </header>
+        <section class="memory-dialog-body">
+          <section class="memory-section" aria-labelledby="longTermMemoryTitle">
+            <div class="memory-section-header">
+              <h3 id="longTermMemoryTitle">Long-term</h3>
+              <span id="longTermMemoryCount" class="memory-count">0</span>
+            </div>
+            <ol id="longTermMemoryList" class="memory-list"></ol>
+          </section>
+          <section class="memory-section" aria-labelledby="shortTermMemoryTitle">
+            <div class="memory-section-header">
+              <h3 id="shortTermMemoryTitle">Short-term</h3>
+              <span id="shortTermMemoryCount" class="memory-count">0</span>
+            </div>
+            <p id="shortTermMemorySummary" class="memory-summary"></p>
+            <ol id="shortTermMemoryList" class="memory-list"></ol>
+          </section>
+        </section>
+      </section>
+    </dialog>
+
+    <script src="./app.js?v=20260520-memory-dialog"></script>
   </body>
 </html>

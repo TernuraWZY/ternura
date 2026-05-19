@@ -12,6 +12,15 @@ const historyCloseButton = document.querySelector("#historyCloseButton");
 const restoreButton = document.querySelector("#restoreButton");
 const historyState = document.querySelector("#historyState");
 const historyList = document.querySelector("#historyList");
+const memoryButton = document.querySelector("#memoryButton");
+const memoryDialog = document.querySelector("#memoryDialog");
+const memoryCloseButton = document.querySelector("#memoryCloseButton");
+const memoryDialogState = document.querySelector("#memoryDialogState");
+const longTermMemoryCount = document.querySelector("#longTermMemoryCount");
+const longTermMemoryList = document.querySelector("#longTermMemoryList");
+const shortTermMemoryCount = document.querySelector("#shortTermMemoryCount");
+const shortTermMemorySummary = document.querySelector("#shortTermMemorySummary");
+const shortTermMemoryList = document.querySelector("#shortTermMemoryList");
 const todoCount = document.querySelector("#todoCount");
 const todoList = document.querySelector("#todoList");
 const eventsList = document.querySelector("#eventsList");
@@ -119,6 +128,7 @@ async function submitPrompt() {
       sessionDetails.delete(currentSessionID);
     }
     await refreshHistoryPanel();
+    await refreshMemoryStatus();
   }
 }
 
@@ -131,9 +141,47 @@ historyCloseButton.addEventListener("click", () => {
   closeHistoryDialog();
 });
 
+memoryButton.addEventListener("click", async () => {
+  await refreshMemoryDialog();
+  openMemoryDialog();
+});
+
+memoryCloseButton.addEventListener("click", () => {
+  closeMemoryDialog();
+});
+
 historyDialog.addEventListener("click", (event) => {
   if (event.target === historyDialog) {
     closeHistoryDialog();
+  }
+});
+
+memoryDialog.addEventListener("click", (event) => {
+  if (event.target === memoryDialog) {
+    closeMemoryDialog();
+  }
+});
+
+longTermMemoryList.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-memory-delete]");
+  if (!button) {
+    return;
+  }
+
+  const id = button.dataset.memoryDelete || "";
+  if (!id || !window.confirm(`Delete memory ${id}?`)) {
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    await deleteMemory(id);
+    addEvent("Memory deleted");
+    await refreshMemoryStatus();
+    await refreshMemoryDialog();
+  } catch {
+    button.disabled = false;
+    addEvent("Memory delete failed");
   }
 });
 
@@ -177,6 +225,7 @@ resetButton.addEventListener("click", async () => {
       throw new Error(`Reset failed: ${response.status}`);
     }
     applyHistory(await response.json());
+    await refreshMemoryStatus();
   } catch {
     addEvent("Preview reset");
   }
@@ -378,6 +427,7 @@ function formatDuration(durationMS) {
 async function loadHistory() {
   try {
     applyHistory(await fetchHistory());
+    await refreshMemoryStatus();
     const session = currentSession();
     if (!session || sessionRunCount(session) === 0) {
       return;
@@ -395,6 +445,7 @@ async function loadHistory() {
 async function refreshHistoryPanel() {
   try {
     applyHistory(await fetchHistory());
+    await refreshMemoryStatus();
   } catch {
     historyState.textContent = "History unavailable";
     restoreButton.disabled = true;
@@ -420,6 +471,187 @@ async function fetchSessionDetail(sessionID) {
 
   const detail = await response.json();
   return detail && typeof detail === "object" ? detail : { session: null, current_session_id: "" };
+}
+
+async function fetchMemoryStatus(sessionID) {
+  const query = sessionID ? `?session_id=${encodeURIComponent(sessionID)}` : "";
+  const response = await fetch(`/api/memory/status${query}`);
+  if (!response.ok) {
+    throw new Error(`Memory status request failed: ${response.status}`);
+  }
+
+  const status = await response.json();
+  return status && typeof status === "object" ? status : null;
+}
+
+async function fetchMemoryDetail(sessionID = currentSessionID) {
+  const query = sessionID ? `?session_id=${encodeURIComponent(sessionID)}` : "";
+  const response = await fetch(`/api/memory${query}`);
+  if (!response.ok) {
+    throw new Error(`Memory detail request failed: ${response.status}`);
+  }
+
+  const detail = await response.json();
+  return detail && typeof detail === "object" ? detail : null;
+}
+
+async function deleteMemory(id) {
+  const response = await fetch("/api/memory", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  if (!response.ok) {
+    throw new Error(`Memory delete failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+async function refreshMemoryStatus(sessionID = currentSessionID) {
+  try {
+    applyMemoryStatus(await fetchMemoryStatus(sessionID));
+  } catch {
+    memoryState.textContent = "Unavailable";
+  }
+}
+
+function applyMemoryStatus(status) {
+  const longTermCount = Number(status?.long_term_count || 0);
+  const shortTermTurns = Number(status?.short_term_turns || 0);
+  if (longTermCount === 0 && shortTermTurns === 0) {
+    memoryState.textContent = "Ready";
+    return;
+  }
+  memoryState.textContent = `${longTermCount} LT · ${shortTermTurns} ST`;
+}
+
+async function refreshMemoryDialog() {
+  try {
+    renderMemoryDialog(await fetchMemoryDetail());
+  } catch {
+    memoryDialogState.textContent = "Memory unavailable";
+    longTermMemoryCount.textContent = "0";
+    shortTermMemoryCount.textContent = "0";
+    longTermMemoryList.replaceChildren(memoryEmptyItem("Long-term memory unavailable."));
+    shortTermMemorySummary.textContent = "";
+    shortTermMemorySummary.hidden = true;
+    shortTermMemoryList.replaceChildren(memoryEmptyItem("Short-term memory unavailable."));
+  }
+}
+
+function renderMemoryDialog(detail) {
+  const longTerm = Array.isArray(detail?.long_term) ? detail.long_term : [];
+  const shortTerm = detail?.short_term && typeof detail.short_term === "object" ? detail.short_term : {};
+  const turns = Array.isArray(shortTerm.turns) ? shortTerm.turns : [];
+
+  memoryDialogState.textContent = `${longTerm.length} long-term · ${turns.length} short-term`;
+  longTermMemoryCount.textContent = String(longTerm.length);
+  shortTermMemoryCount.textContent = String(turns.length);
+
+  if (longTerm.length === 0) {
+    longTermMemoryList.replaceChildren(memoryEmptyItem("No long-term memory yet."));
+  } else {
+    longTermMemoryList.replaceChildren(...longTerm.map(renderLongTermMemory));
+  }
+
+  shortTermMemorySummary.textContent = shortTerm.summary || "";
+  shortTermMemorySummary.hidden = !shortTerm.summary;
+  if (turns.length === 0) {
+    shortTermMemoryList.replaceChildren(memoryEmptyItem("No short-term turns in this session yet."));
+  } else {
+    shortTermMemoryList.replaceChildren(...turns.slice().reverse().map(renderShortTermTurn));
+  }
+}
+
+function renderLongTermMemory(memory) {
+  const item = document.createElement("li");
+  item.className = "memory-card";
+
+  const header = document.createElement("div");
+  header.className = "memory-card-header";
+
+  const category = document.createElement("span");
+  category.className = "memory-category";
+  category.textContent = memory.category || "memory";
+
+  const id = document.createElement("span");
+  id.className = "memory-id";
+  id.textContent = memory.id || "";
+
+  header.append(category, id);
+
+  const content = document.createElement("p");
+  content.className = "memory-content";
+  content.textContent = memory.content || "";
+
+  const footer = document.createElement("div");
+  footer.className = "memory-card-footer";
+
+  const meta = document.createElement("span");
+  meta.className = "memory-meta";
+  meta.textContent = memory.updated_at ? `Updated ${formatMemoryDate(memory.updated_at)}` : "";
+
+  const deleteButton = document.createElement("button");
+  deleteButton.className = "memory-delete-button";
+  deleteButton.type = "button";
+  deleteButton.dataset.memoryDelete = memory.id || "";
+  deleteButton.textContent = "Delete";
+  deleteButton.disabled = !memory.id;
+
+  footer.append(meta, deleteButton);
+  item.append(header, content, footer);
+  return item;
+}
+
+function renderShortTermTurn(turn) {
+  const item = document.createElement("li");
+  item.className = "memory-card";
+
+  const header = document.createElement("div");
+  header.className = "memory-card-header";
+
+  const label = document.createElement("span");
+  label.className = "memory-category";
+  label.textContent = "turn";
+
+  const at = document.createElement("span");
+  at.className = "memory-id";
+  at.textContent = turn.at ? formatMemoryDate(turn.at) : "";
+
+  header.append(label, at);
+
+  const user = document.createElement("p");
+  user.className = "memory-content";
+  user.textContent = `User: ${turn.user || ""}`;
+  item.append(header, user);
+
+  if (turn.assistant) {
+    const assistant = document.createElement("p");
+    assistant.className = "memory-content memory-content-muted";
+    assistant.textContent = `Ternura: ${turn.assistant}`;
+    item.append(assistant);
+  }
+  return item;
+}
+
+function memoryEmptyItem(text) {
+  const item = document.createElement("li");
+  item.className = "memory-empty";
+  item.textContent = text;
+  return item;
+}
+
+function formatMemoryDate(raw) {
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    return raw;
+  }
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function applyHistory(history) {
@@ -467,6 +699,7 @@ async function restoreSession(sessionID) {
   setRunState(currentRun);
   setState("Idle", "Ready", "Ready", "Ready");
   renderTodosPanel();
+  refreshMemoryStatus();
   renderHistoryPanel();
   addEvent(`Session restored · ${session.title || "Untitled session"}`);
   scrollConversation();
@@ -798,12 +1031,30 @@ function closeHistoryDialog() {
   historyDialog.removeAttribute("open");
 }
 
+function openMemoryDialog() {
+  if (typeof memoryDialog.showModal === "function") {
+    if (!memoryDialog.open) {
+      memoryDialog.showModal();
+    }
+    return;
+  }
+  memoryDialog.setAttribute("open", "");
+}
+
+function closeMemoryDialog() {
+  if (typeof memoryDialog.close === "function" && memoryDialog.open) {
+    memoryDialog.close();
+    return;
+  }
+  memoryDialog.removeAttribute("open");
+}
+
 function setRunning(isRunning) {
   sendButton.disabled = isRunning;
   resetButton.disabled = isRunning;
-  restoreButton.disabled = isRunning || !currentSession() || sessionRuns(currentSession()).length === 0;
+  restoreButton.disabled = isRunning || !currentSession() || sessionRunCount(currentSession()) === 0;
   if (isRunning) {
-    setState("Running", "Active", "Ready", "Writing");
+    setState("Running", "Active", "Active", "Writing");
     consoleStatus.textContent = "Running";
     addEvent("Thinking");
     return;
@@ -811,7 +1062,7 @@ function setRunning(isRunning) {
 
   sessionState.textContent = "Idle";
   contextState.textContent = "Ready";
-  memoryState.textContent = "Ready";
+  refreshMemoryStatus();
   if (!currentRun || currentRun.status === "running") {
     consoleStatus.textContent = "Ready";
   }

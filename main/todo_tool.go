@@ -7,13 +7,15 @@ import (
 	"ternura/tool"
 )
 
-func newAgentTools(updateTodos tool.UpdateTodosFunc) []tool.Tool {
+func newAgentTools(updateTodos tool.UpdateTodosFunc, remember tool.RememberFunc, forgetMemory tool.ForgetMemoryFunc) []tool.Tool {
 	return []tool.Tool{
 		tool.NewReadTool(),
 		tool.NewEditTool(),
 		tool.NewWriteTool(),
 		tool.NewBashTool(),
 		tool.NewUpdateTodosTool(updateTodos),
+		tool.NewRememberTool(remember),
+		tool.NewForgetMemoryTool(forgetMemory),
 	}
 }
 
@@ -34,5 +36,22 @@ func (s *agentServer) updateTodos(_ context.Context, todos []tool.TodoItem) erro
 	if session, ok := currentSessionFromSnapshot(snapshot); ok {
 		log.Printf("updated %d todos for %s", len(session.Todos), session.SessionID)
 	}
+	return nil
+}
+
+func (s *agentServer) rememberMemory(ctx context.Context, item tool.MemoryItem) (tool.MemoryResult, error) {
+	result, err := s.memory.Remember(ctx, item)
+	if err != nil {
+		return tool.MemoryResult{}, err
+	}
+	log.Printf("stored long-term memory %s", result.ID)
+	return result, nil
+}
+
+func (s *agentServer) forgetMemory(ctx context.Context, id string) error {
+	if err := s.memory.Forget(ctx, id); err != nil {
+		return err
+	}
+	log.Printf("forgot long-term memory %s", id)
 	return nil
 }

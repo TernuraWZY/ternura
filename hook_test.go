@@ -43,6 +43,22 @@ func TestChatCompletionParamsFilterDisabledTools(t *testing.T) {
 	}
 }
 
+func TestRuntimeContextDoesNotAddSecondSystemMessage(t *testing.T) {
+	agent := NewAgent(testModelConfig(), "system", nil)
+	agent.RestoreConversation([]ConversationMessage{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi"},
+	})
+	runCtx := NewRunContext("next", RunModeSync)
+	runCtx.SetContextBlock("memory", "Memory", "User prefers concise replies.")
+
+	params := agent.newChatCompletionParams(runCtx)
+
+	if len(params.Messages) != len(agent.messages) {
+		t.Fatalf("messages = %d, want %d; runtime context should be merged into first system message", len(params.Messages), len(agent.messages))
+	}
+}
+
 func TestBeforeToolCallHookCanBlockExecution(t *testing.T) {
 	agent := NewAgent(testModelConfig(), "system", []tool.Tool{
 		tool.NewBashTool(),

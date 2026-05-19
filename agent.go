@@ -424,13 +424,11 @@ func (a *Agent) messagesWithRuntimeContext(runCtx *RunContext) []openai.ChatComp
 	}
 
 	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(a.messages)+1)
+	systemContent := strings.TrimSpace(a.systemPrompt + "\n\n" + runtimeContext)
+	messages = append(messages, openai.SystemMessage(systemContent))
 	if len(a.messages) == 0 {
-		messages = append(messages, openai.SystemMessage(a.systemPrompt))
-		messages = append(messages, openai.SystemMessage(runtimeContext))
 		return messages
 	}
-	messages = append(messages, a.messages[0])
-	messages = append(messages, openai.SystemMessage(runtimeContext))
 	messages = append(messages, a.messages[1:]...)
 	return messages
 }

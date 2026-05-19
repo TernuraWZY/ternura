@@ -187,6 +187,19 @@ textarea {
   white-space: nowrap;
 }
 
+.memory-status-button {
+  width: 100%;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.memory-status-button:hover,
+.memory-status-button:focus-visible {
+  border-color: var(--final-line);
+  background: var(--teal-soft);
+  outline: none;
+}
+
 .run-status-row {
   align-items: flex-start;
   padding-block: 10px;
@@ -515,7 +528,8 @@ textarea {
   line-height: 1.4;
 }
 
-.history-dialog {
+.history-dialog,
+.memory-dialog {
   width: min(780px, calc(100vw - 40px));
   max-height: calc(100dvh - 72px);
   padding: 0;
@@ -525,11 +539,13 @@ textarea {
   background: transparent;
 }
 
-.history-dialog::backdrop {
+.history-dialog::backdrop,
+.memory-dialog::backdrop {
   background: rgba(8, 20, 18, 0.48);
 }
 
-.history-dialog-card {
+.history-dialog-card,
+.memory-dialog-card {
   display: grid;
   max-height: calc(100dvh - 72px);
   grid-template-rows: auto minmax(0, 1fr);
@@ -540,7 +556,8 @@ textarea {
   overflow: hidden;
 }
 
-.history-dialog-header {
+.history-dialog-header,
+.memory-dialog-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -550,7 +567,8 @@ textarea {
   background: var(--canvas);
 }
 
-.history-dialog-header h2 {
+.history-dialog-header h2,
+.memory-dialog-header h2 {
   margin: 0 0 6px;
   color: var(--text);
   font-size: 22px;
@@ -590,6 +608,155 @@ textarea {
   max-height: min(62vh, 580px);
   padding: 18px 20px 20px;
   background: var(--canvas);
+}
+
+.memory-dialog-body {
+  display: grid;
+  max-height: min(68vh, 640px);
+  gap: 18px;
+  padding: 18px 20px 20px;
+  background: var(--canvas);
+  overflow: auto;
+}
+
+.memory-section {
+  display: grid;
+  gap: 10px;
+}
+
+.memory-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memory-section-header h3 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.memory-dialog-state,
+.memory-summary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.memory-summary {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.memory-count {
+  display: grid;
+  min-width: 26px;
+  height: 24px;
+  place-items: center;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--teal-dark);
+  background: var(--teal-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.memory-list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memory-card,
+.memory-empty {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--message-shadow);
+}
+
+.memory-empty {
+  color: var(--muted);
+  text-align: center;
+}
+
+.memory-card-header,
+.memory-card-footer {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memory-category {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--teal-dark);
+  background: var(--teal-soft);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.memory-id,
+.memory-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-content {
+  margin: 11px 0 0;
+  color: var(--event-text);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.memory-content-muted {
+  color: var(--muted);
+}
+
+.memory-delete-button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--trace-line);
+  border-radius: 8px;
+  color: var(--pink);
+  background: var(--pink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.memory-delete-button:hover,
+.memory-delete-button:focus-visible {
+  border-color: var(--pink);
+  background: var(--panel);
+  outline: none;
+}
+
+.memory-delete-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .events-list {
@@ -640,6 +807,8 @@ textarea {
 
 .reset-button:active,
 .send-button:active,
+.memory-status-button:active,
+.memory-delete-button:active,
 .theme-button:active,
 .stop-button:active,
 .history-button:active,
@@ -1227,16 +1396,19 @@ textarea {
     display: none;
   }
 
-  .history-dialog {
+  .history-dialog,
+  .memory-dialog {
     width: calc(100vw - 24px);
     max-height: calc(100dvh - 28px);
   }
 
-  .history-dialog-card {
+  .history-dialog-card,
+  .memory-dialog-card {
     max-height: calc(100dvh - 28px);
   }
 
-  .history-dialog-header {
+  .history-dialog-header,
+  .memory-dialog-header {
     padding: 16px;
   }
 }

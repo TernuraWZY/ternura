@@ -255,6 +255,13 @@ func (s *sessionStore) Snapshot() sessionSnapshot {
 	return cloneSnapshot(s.snapshot)
 }
 
+func (s *sessionStore) CurrentSessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.snapshot.CurrentSessionID
+}
+
 func (s *sessionStore) SelectSession(sessionID string) (sessionSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
