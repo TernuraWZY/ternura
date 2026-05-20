@@ -31,6 +31,7 @@ type RunContext struct {
 
 	contextBlocks []RuntimeContextBlock
 	disabledTools map[tool.AgentTool]string
+	toolResults   []ToolExecution
 }
 
 func NewRunContext(query string, mode RunMode) *RunContext {
@@ -97,6 +98,26 @@ func (r *RunContext) ToolDisabled(name tool.AgentTool) (string, bool) {
 	return reason, ok
 }
 
+func (r *RunContext) ToolResults() []ToolExecution {
+	if r == nil || len(r.toolResults) == 0 {
+		return nil
+	}
+	results := make([]ToolExecution, len(r.toolResults))
+	copy(results, r.toolResults)
+	return results
+}
+
+func (r *RunContext) recordToolResult(result ToolResult) {
+	if r == nil {
+		return
+	}
+	r.toolResults = append(r.toolResults, ToolExecution{
+		Call:    result.Call,
+		Content: result.Content,
+		Error:   result.ErrorString(),
+	})
+}
+
 func (r *RunContext) RuntimeContextText() string {
 	if len(r.contextBlocks) == 0 {
 		return ""
@@ -129,6 +150,12 @@ type ToolResult struct {
 	Call    ToolCall
 	Content string
 	Err     error
+}
+
+type ToolExecution struct {
+	Call    ToolCall
+	Content string
+	Error   string
 }
 
 func (r ToolResult) ErrorString() string {
@@ -176,6 +203,10 @@ type AfterToolCallHook interface {
 
 type AfterRunHook interface {
 	AfterRun(ctx context.Context, run *RunContext, result AgentRunResult, runErr error) error
+}
+
+type FinalizeRunHook interface {
+	FinalizeRun(ctx context.Context, run *RunContext, result *AgentRunResult) error
 }
 
 type HookManager struct {
@@ -300,6 +331,20 @@ func (m *HookManager) AfterRun(ctx context.Context, run *RunContext, result Agen
 		if typed, ok := hook.(AfterRunHook); ok {
 			if err := typed.AfterRun(ctx, run, result, runErr); err != nil {
 				return wrapHookError(hook, "AfterRun", err)
+			}
+		}
+	}
+	return nil
+}
+
+func (m *HookManager) FinalizeRun(ctx context.Context, run *RunContext, result *AgentRunResult) error {
+	if m == nil {
+		return nil
+	}
+	for _, hook := range m.hooks {
+		if typed, ok := hook.(FinalizeRunHook); ok {
+			if err := typed.FinalizeRun(ctx, run, result); err != nil {
+				return wrapHookError(hook, "FinalizeRun", err)
 			}
 		}
 	}

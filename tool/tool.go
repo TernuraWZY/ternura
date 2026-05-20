@@ -16,6 +16,8 @@ const (
 	AgentToolUpdateTodos  AgentTool = "update_todos"
 	AgentToolRemember     AgentTool = "remember"
 	AgentToolForgetMemory AgentTool = "forget_memory"
+	AgentToolScheduleTask AgentTool = "schedule_task"
+	AgentToolCancelTask   AgentTool = "cancel_scheduled_task"
 )
 
 type Tool interface {

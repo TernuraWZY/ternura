@@ -90,6 +90,11 @@
               <span class="history-button-text">History</span>
               <span id="historyCount" class="history-count">0</span>
             </button>
+            <button id="scheduleButton" class="history-button schedule-button" type="button" title="Open schedules" aria-label="Open schedules">
+              <span class="schedule-button-icon" aria-hidden="true"></span>
+              <span class="history-button-text">Schedule</span>
+              <span id="scheduleCount" class="history-count">0</span>
+            </button>
             <button id="themeButton" class="theme-button" type="button" title="Switch theme" aria-label="Switch theme" aria-pressed="false">
               <span class="theme-icon" aria-hidden="true"></span>
             </button>
@@ -156,6 +161,36 @@
       </section>
     </dialog>
 
-    <script src="./app.js?v=20260520-memory-dialog"></script>
+    <dialog id="scheduleDialog" class="schedule-dialog" aria-labelledby="scheduleDialogTitle">
+      <section class="schedule-dialog-card">
+        <header class="schedule-dialog-header">
+          <div>
+            <h2 id="scheduleDialogTitle">Schedules</h2>
+            <p id="scheduleState" class="history-state">No scheduled tasks</p>
+          </div>
+          <button id="scheduleCloseButton" class="history-close-button" type="button" title="Close schedules" aria-label="Close schedules">×</button>
+        </header>
+        <section class="schedule-dialog-body">
+          <form id="scheduleForm" class="schedule-form">
+            <label>
+              <span>Title</span>
+              <input id="scheduleTitleInput" name="title" type="text" placeholder="Check build">
+            </label>
+            <label>
+              <span>Run at</span>
+              <input id="scheduleRunAtInput" name="run_at" type="datetime-local" required>
+            </label>
+            <label class="schedule-prompt-field">
+              <span>Prompt</span>
+              <textarea id="schedulePromptInput" name="prompt" rows="4" placeholder="What should Ternura do later?" required></textarea>
+            </label>
+            <button id="scheduleCreateButton" class="restore-button" type="submit">Create</button>
+          </form>
+          <ol id="scheduleList" class="schedule-list"></ol>
+        </section>
+      </section>
+    </dialog>
+
+    <script src="./app.js?v=20260521-schedule-sync"></script>
   </body>
 </html>

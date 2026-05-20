@@ -17,6 +17,7 @@ import (
 
 	"ternura"
 	"ternura/shared"
+	"ternura/tool"
 )
 
 func main() {
@@ -34,6 +35,7 @@ func main() {
 
 	if *serve {
 		server := newAgentServer(modelConf)
+		go newScheduleRunner(server).Run(ctx)
 		log.Printf("serving Ternura console on http://localhost%s", *addr)
 		if err := http.ListenAndServe(*addr, server.routes()); err != nil {
 			log.Fatalf("server error: %v", err)
@@ -41,7 +43,7 @@ func main() {
 		return
 	}
 
-	agent := ternura.NewAgent(modelConf, ternura.TernuraAgentSystemPrompt, newAgentTools(nil, nil, nil))
+	agent := ternura.NewAgent(modelConf, ternura.TernuraAgentSystemPrompt, newAgentTools(nil, nil, nil, nil, nil))
 	result, err := agent.RunWithTrace(ctx, *query)
 	if err != nil {
 		log.Printf("agent run error: %v", err)
@@ -60,6 +62,7 @@ type agentServer struct {
 	agent     *ternura.Agent
 	store     *sessionStore
 	memory    *memoryStore
+	schedules *scheduleStore
 }
 
 type chatRequest struct {
@@ -88,8 +91,12 @@ func newAgentServer(modelConf shared.ModelConfig) *agentServer {
 		store:     newSessionStore(defaultSessionPath),
 	}
 	s.memory = newMemoryStore(s.store.root)
+	s.schedules = newScheduleStore(s.store.root)
 	if err := s.store.Load(); err != nil {
 		log.Printf("load persisted session: %v", err)
+	}
+	if err := s.schedules.Load(); err != nil {
+		log.Printf("load schedules: %v", err)
 	}
 	s.resetAgentFromHistory()
 	return s
@@ -102,6 +109,7 @@ func (s *agentServer) routes() http.Handler {
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/api/memory", s.handleMemory)
 	mux.HandleFunc("/api/memory/status", s.handleMemoryStatus)
+	mux.HandleFunc("/api/schedules", s.handleSchedules)
 	mux.HandleFunc("/api/session", s.handleSessionDetail)
 	mux.HandleFunc("/api/session/select", s.handleSelectSession)
 	mux.HandleFunc("/api/reset", s.handleReset)
@@ -139,6 +147,32 @@ func (s *agentServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	logRunStart(run)
 	if err := s.store.StartRun(run, req.Message); err != nil {
 		log.Printf("persist run start %s: %v", run.ID, err)
+	}
+
+	if result, handled, err := s.tryScheduleShortcut(r.Context(), req.Message); handled {
+		finished := time.Now()
+		status := runStatusSucceeded
+		httpStatus := http.StatusOK
+		if err != nil {
+			status = runStatusFailed
+			httpStatus = http.StatusBadGateway
+			result = ternura.AgentRunResult{Content: err.Error()}
+		}
+		logRunFinish(run, status, finished)
+		if persistErr := s.store.FinishRun(run, req.Message, result, status, finished, err); persistErr != nil {
+			log.Printf("persist shortcut run %s: %v", run.ID, persistErr)
+		}
+		resp := chatResponse{
+			Content:    result.Content,
+			Trace:      result.Trace,
+			RawContent: result.RawContent,
+		}
+		if err != nil {
+			resp.Error = err.Error()
+		}
+		applyRunFields(&resp, run, status, finished)
+		writeJSON(w, httpStatus, resp)
+		return
 	}
 
 	result, err := s.agent.RunWithTrace(r.Context(), req.Message)
@@ -220,6 +254,31 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		Status:    runStatusRunning,
 		StartedAt: run.StartedAt.Format(time.RFC3339Nano),
 	}); err != nil {
+		return
+	}
+
+	if result, handled, err := s.tryScheduleShortcut(r.Context(), req.Message); handled {
+		finished := time.Now()
+		status := runStatusSucceeded
+		eventType := eventTypeRunDone
+		if err != nil {
+			status = runStatusFailed
+			eventType = eventTypeRunFailed
+			result = ternura.AgentRunResult{Content: err.Error(), RawContent: err.Error()}
+		} else if emitErr := emitScheduleShortcutResult(emit, result); emitErr != nil {
+			return
+		}
+		logRunFinish(run, status, finished)
+		if persistErr := s.store.FinishRun(run, req.Message, result, status, finished, err); persistErr != nil {
+			log.Printf("persist shortcut run %s: %v", run.ID, persistErr)
+		}
+		_ = emit(run.finishEvent(eventType, status, finished, err))
+		if err != nil {
+			_ = emit(ternura.AgentStreamEvent{
+				Type:  eventTypeError,
+				Error: err.Error(),
+			})
+		}
 		return
 	}
 
@@ -590,6 +649,62 @@ func (s *agentServer) handleMemory(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *agentServer) handleSchedules(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeSchedulesJSON(w, http.StatusOK, s.schedulesResponse())
+	case http.MethodPost:
+		var req scheduleCreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		sessionID := req.SessionID
+		if sessionID == "" {
+			sessionID = s.store.CurrentSessionID()
+		}
+		if !s.sessionExists(sessionID) {
+			http.Error(w, fmt.Sprintf("session %q not found", sessionID), http.StatusNotFound)
+			return
+		}
+		if _, err := s.schedules.Create(r.Context(), sessionID, tool.ScheduleTaskInput{
+			Title:        req.Title,
+			Prompt:       req.Prompt,
+			RunAt:        req.RunAt,
+			DelaySeconds: req.DelaySeconds,
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeSchedulesJSON(w, http.StatusCreated, s.schedulesResponse())
+	case http.MethodDelete:
+		var req scheduleCancelRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if _, err := s.schedules.Cancel(r.Context(), req.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeSchedulesJSON(w, http.StatusOK, s.schedulesResponse())
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *agentServer) schedulesResponse() schedulesResponse {
+	return schedulesResponse{
+		CurrentSessionID: s.store.CurrentSessionID(),
+		Tasks:            s.schedules.Snapshot(),
+	}
+}
+
+func (s *agentServer) sessionExists(sessionID string) bool {
+	snapshot := s.store.Snapshot()
+	return findSession(snapshot.Sessions, sessionID) != nil
+}
+
 func (s *agentServer) handleSelectSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -645,8 +760,13 @@ func (s *agentServer) resetAgent() {
 	s.agent = ternura.NewAgent(
 		s.modelConf,
 		ternura.TernuraAgentSystemPrompt,
-		newAgentTools(s.updateTodos, s.rememberMemory, s.forgetMemory),
-		ternura.WithHooks(newMemoryHook(s.memory, s.store.CurrentSessionID)),
+		newAgentTools(s.updateTodos, s.rememberMemory, s.forgetMemory, s.scheduleTask, s.cancelScheduledTask),
+		ternura.WithHooks(
+			newCurrentTimeHook(),
+			newMemoryHook(s.memory, s.store.CurrentSessionID),
+			newScheduleGuidanceHook(),
+			newStateGuardHook(s.schedules),
+		),
 	)
 }
 
@@ -660,15 +780,19 @@ func (s *agentServer) resetAgentFromSnapshot(snapshot sessionSnapshot) {
 	if !ok || len(session.Messages) == 0 {
 		return
 	}
-	messages := make([]ternura.ConversationMessage, 0, len(session.Messages))
-	for _, message := range session.Messages {
+	restoreAgentConversation(s.agent, session.Messages)
+	log.Printf("restored %d persisted conversation messages from %s", len(session.Messages), session.SessionID)
+}
+
+func restoreAgentConversation(agent *ternura.Agent, persisted []persistedMessage) {
+	messages := make([]ternura.ConversationMessage, 0, len(persisted))
+	for _, message := range persisted {
 		messages = append(messages, ternura.ConversationMessage{
 			Role:    message.Role,
 			Content: message.Content,
 		})
 	}
-	s.agent.RestoreConversation(messages)
-	log.Printf("restored %d persisted conversation messages from %s", len(messages), session.SessionID)
+	agent.RestoreConversation(messages)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value chatResponse) {
@@ -708,6 +832,14 @@ func writeMemoryDetailJSON(w http.ResponseWriter, status int, value memoryDetail
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		log.Printf("write memory detail response: %v", err)
+	}
+}
+
+func writeSchedulesJSON(w http.ResponseWriter, status int, value schedulesResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		log.Printf("write schedules response: %v", err)
 	}
 }
 

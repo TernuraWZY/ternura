@@ -12,6 +12,16 @@ const historyCloseButton = document.querySelector("#historyCloseButton");
 const restoreButton = document.querySelector("#restoreButton");
 const historyState = document.querySelector("#historyState");
 const historyList = document.querySelector("#historyList");
+const scheduleButton = document.querySelector("#scheduleButton");
+const scheduleCount = document.querySelector("#scheduleCount");
+const scheduleDialog = document.querySelector("#scheduleDialog");
+const scheduleCloseButton = document.querySelector("#scheduleCloseButton");
+const scheduleState = document.querySelector("#scheduleState");
+const scheduleForm = document.querySelector("#scheduleForm");
+const scheduleTitleInput = document.querySelector("#scheduleTitleInput");
+const scheduleRunAtInput = document.querySelector("#scheduleRunAtInput");
+const schedulePromptInput = document.querySelector("#schedulePromptInput");
+const scheduleList = document.querySelector("#scheduleList");
 const memoryButton = document.querySelector("#memoryButton");
 const memoryDialog = document.querySelector("#memoryDialog");
 const memoryCloseButton = document.querySelector("#memoryCloseButton");
@@ -43,7 +53,10 @@ let scrollFrame = null;
 let currentRun = null;
 let persistedSessions = [];
 const sessionDetails = new Map();
+const scheduleSnapshots = new Map();
 let currentSessionID = "";
+let schedulesHaveLoaded = false;
+let scheduleRefreshPromise = null;
 let promptInputComposing = false;
 let promptInputLastCompositionAt = 0;
 let promptInputCompositionSettlingUntil = 0;
@@ -141,6 +154,21 @@ historyCloseButton.addEventListener("click", () => {
   closeHistoryDialog();
 });
 
+scheduleButton.addEventListener("click", async () => {
+  await refreshSchedules();
+  setDefaultScheduleTime();
+  openScheduleDialog();
+});
+
+scheduleCloseButton.addEventListener("click", () => {
+  closeScheduleDialog();
+});
+
+scheduleForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await createScheduleFromForm();
+});
+
 memoryButton.addEventListener("click", async () => {
   await refreshMemoryDialog();
   openMemoryDialog();
@@ -159,6 +187,34 @@ historyDialog.addEventListener("click", (event) => {
 memoryDialog.addEventListener("click", (event) => {
   if (event.target === memoryDialog) {
     closeMemoryDialog();
+  }
+});
+
+scheduleDialog.addEventListener("click", (event) => {
+  if (event.target === scheduleDialog) {
+    closeScheduleDialog();
+  }
+});
+
+scheduleList.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-schedule-cancel]");
+  if (!button) {
+    return;
+  }
+
+  const id = button.dataset.scheduleCancel || "";
+  if (!id || !window.confirm(`Cancel schedule ${id}?`)) {
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    await cancelSchedule(id);
+    addEvent("Schedule cancelled");
+    await refreshSchedules();
+  } catch {
+    button.disabled = false;
+    addEvent("Schedule cancel failed");
   }
 });
 
@@ -226,6 +282,7 @@ resetButton.addEventListener("click", async () => {
     }
     applyHistory(await response.json());
     await refreshMemoryStatus();
+    await refreshSchedules();
   } catch {
     addEvent("Preview reset");
   }
@@ -288,6 +345,7 @@ promptInput.addEventListener("keydown", (event) => {
 });
 
 loadHistory();
+window.setInterval(refreshSchedules, 15000);
 
 function getInitialTheme() {
   return readStoredTheme() || preferredSystemTheme();
@@ -428,6 +486,7 @@ async function loadHistory() {
   try {
     applyHistory(await fetchHistory());
     await refreshMemoryStatus();
+    await refreshSchedules();
     const session = currentSession();
     if (!session || sessionRunCount(session) === 0) {
       return;
@@ -446,6 +505,7 @@ async function refreshHistoryPanel() {
   try {
     applyHistory(await fetchHistory());
     await refreshMemoryStatus();
+    await refreshSchedules();
   } catch {
     historyState.textContent = "History unavailable";
     restoreButton.disabled = true;
@@ -495,6 +555,40 @@ async function fetchMemoryDetail(sessionID = currentSessionID) {
   return detail && typeof detail === "object" ? detail : null;
 }
 
+async function fetchSchedules() {
+  const response = await fetch("/api/schedules");
+  if (!response.ok) {
+    throw new Error(`Schedules request failed: ${response.status}`);
+  }
+
+  const schedules = await response.json();
+  return schedules && typeof schedules === "object" ? schedules : { tasks: [], current_session_id: "" };
+}
+
+async function createSchedule(payload) {
+  const response = await fetch("/api/schedules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text() || `Schedule create failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+async function cancelSchedule(id) {
+  const response = await fetch("/api/schedules", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text() || `Schedule cancel failed: ${response.status}`);
+  }
+  return response.json();
+}
+
 async function deleteMemory(id) {
   const response = await fetch("/api/memory", {
     method: "DELETE",
@@ -523,6 +617,280 @@ function applyMemoryStatus(status) {
     return;
   }
   memoryState.textContent = `${longTermCount} LT · ${shortTermTurns} ST`;
+}
+
+async function refreshSchedules() {
+  if (scheduleRefreshPromise) {
+    return scheduleRefreshPromise;
+  }
+
+  scheduleRefreshPromise = refreshSchedulesNow();
+  try {
+    return await scheduleRefreshPromise;
+  } finally {
+    scheduleRefreshPromise = null;
+  }
+}
+
+async function refreshSchedulesNow() {
+  try {
+    const payload = await fetchSchedules();
+    const terminalTasks = detectScheduleTerminalChanges(payload);
+    renderSchedules(payload);
+    await syncCompletedSchedules(terminalTasks);
+  } catch {
+    scheduleCount.textContent = "0";
+    scheduleState.textContent = "Schedules unavailable";
+    scheduleList.replaceChildren(scheduleEmptyItem("Schedules unavailable."));
+  }
+}
+
+function detectScheduleTerminalChanges(payload) {
+  const tasks = Array.isArray(payload?.tasks) ? payload.tasks : [];
+  const next = new Map();
+  const changed = [];
+
+  tasks.forEach((task) => {
+    const id = task.id || "";
+    if (!id) {
+      return;
+    }
+
+    const previous = scheduleSnapshots.get(id);
+    const snapshot = {
+      status: task.status || "",
+      lastRunID: task.last_run_id || "",
+      lastError: task.last_error || "",
+    };
+    next.set(id, snapshot);
+
+    if (!schedulesHaveLoaded || !isScheduleTerminal(task.status)) {
+      return;
+    }
+    if (!previous) {
+      return;
+    }
+    if (previous.status !== snapshot.status || previous.lastRunID !== snapshot.lastRunID || previous.lastError !== snapshot.lastError) {
+      changed.push(task);
+    }
+  });
+
+  scheduleSnapshots.clear();
+  next.forEach((value, key) => {
+    scheduleSnapshots.set(key, value);
+  });
+  schedulesHaveLoaded = true;
+  return changed;
+}
+
+function isScheduleTerminal(status) {
+  return status === "completed" || status === "failed";
+}
+
+async function syncCompletedSchedules(tasks) {
+  if (!tasks.length) {
+    return;
+  }
+
+  tasks.forEach((task) => {
+    const label = task.status === "failed" ? "failed" : "completed";
+    addEvent(`Schedule ${label} · ${task.title || task.id || "Untitled"}`);
+  });
+
+  const currentSessionTask = tasks.find((task) => task.session_id === currentSessionID && task.last_run_id);
+  try {
+    applyHistory(await fetchHistory());
+    await refreshMemoryStatus();
+  } catch {
+    addEvent("Schedule result saved");
+    return;
+  }
+
+  if (!currentSessionTask || controller) {
+    if (currentSessionTask) {
+      addEvent("Scheduled result ready");
+    }
+    return;
+  }
+
+  sessionDetails.delete(currentSessionID);
+  await restoreSession(currentSessionID);
+  addEvent("Scheduled result loaded");
+}
+
+function renderSchedules(payload) {
+  const tasks = Array.isArray(payload?.tasks) ? payload.tasks : [];
+  const activeCount = tasks.filter((task) => task.status === "scheduled" || task.status === "running").length;
+  scheduleCount.textContent = String(activeCount);
+  scheduleButton.title = activeCount === 0 ? "No active schedules" : `Open ${activeCount} active ${activeCount === 1 ? "schedule" : "schedules"}`;
+  scheduleState.textContent = tasks.length === 0 ? "No scheduled tasks" : `${activeCount} active · ${tasks.length} total`;
+
+  if (tasks.length === 0) {
+    scheduleList.replaceChildren(scheduleEmptyItem("No scheduled tasks yet."));
+    return;
+  }
+  scheduleList.replaceChildren(...tasks.map(renderScheduleTask));
+}
+
+async function createScheduleFromForm() {
+  const prompt = schedulePromptInput.value.trim();
+  const runAtValue = scheduleRunAtInput.value;
+  if (!prompt || !runAtValue) {
+    addEvent("Schedule details required");
+    return;
+  }
+
+  const runAt = new Date(runAtValue);
+  if (Number.isNaN(runAt.getTime())) {
+    addEvent("Schedule time invalid");
+    return;
+  }
+
+  const button = scheduleForm.querySelector("button[type='submit']");
+  button.disabled = true;
+  try {
+    await createSchedule({
+      title: scheduleTitleInput.value.trim(),
+      prompt,
+      run_at: runAt.toISOString(),
+      session_id: currentSessionID,
+    });
+    scheduleForm.reset();
+    setDefaultScheduleTime();
+    addEvent("Schedule created");
+    await refreshSchedules();
+  } catch {
+    addEvent("Schedule create failed");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderScheduleTask(task) {
+  const item = document.createElement("li");
+  item.className = `schedule-card ${scheduleStatusClass(task.status)}`;
+
+  const header = document.createElement("div");
+  header.className = "schedule-card-header";
+
+  const title = document.createElement("span");
+  title.className = "schedule-title";
+  title.textContent = task.title || "Untitled schedule";
+
+  const status = document.createElement("span");
+  status.className = `schedule-status ${scheduleStatusClass(task.status)}`;
+  status.textContent = scheduleStatusLabel(task.status);
+
+  header.append(title, status);
+
+  const prompt = document.createElement("p");
+  prompt.className = "schedule-prompt";
+  prompt.textContent = task.prompt || "";
+
+  const footer = document.createElement("div");
+  footer.className = "schedule-card-footer";
+
+  const meta = document.createElement("span");
+  meta.className = "schedule-meta";
+  meta.textContent = scheduleMeta(task);
+
+  footer.append(meta);
+  if (task.status === "scheduled") {
+    const cancelButton = document.createElement("button");
+    cancelButton.className = "schedule-cancel-button";
+    cancelButton.type = "button";
+    cancelButton.dataset.scheduleCancel = task.id || "";
+    cancelButton.textContent = "Cancel";
+    cancelButton.disabled = !task.id;
+    footer.append(cancelButton);
+  }
+
+  if (task.last_error) {
+    const error = document.createElement("p");
+    error.className = "schedule-prompt memory-content-muted";
+    error.textContent = task.last_error;
+    item.append(header, prompt, error, footer);
+    return item;
+  }
+
+  item.append(header, prompt, footer);
+  return item;
+}
+
+function scheduleEmptyItem(text) {
+  const item = document.createElement("li");
+  item.className = "schedule-empty";
+  item.textContent = text;
+  return item;
+}
+
+function scheduleStatusClass(status) {
+  switch (status) {
+    case "running":
+      return "running";
+    case "completed":
+      return "completed";
+    case "cancelled":
+      return "cancelled";
+    case "failed":
+      return "failed";
+    case "scheduled":
+    default:
+      return "scheduled";
+  }
+}
+
+function scheduleStatusLabel(status) {
+  switch (status) {
+    case "running":
+      return "Running";
+    case "completed":
+      return "Done";
+    case "cancelled":
+      return "Cancelled";
+    case "failed":
+      return "Failed";
+    case "scheduled":
+    default:
+      return "Scheduled";
+  }
+}
+
+function scheduleMeta(task) {
+  const parts = [];
+  if (task.run_at) {
+    parts.push(`Run at ${formatMemoryDate(task.run_at)}`);
+  }
+  if (task.last_run_id) {
+    parts.push(task.last_run_id);
+  } else if (task.id) {
+    parts.push(task.id);
+  }
+  return parts.join(" · ");
+}
+
+function setDefaultScheduleTime() {
+  if (scheduleRunAtInput.value) {
+    return;
+  }
+  const next = new Date(Date.now() + 10 * 60 * 1000);
+  next.setSeconds(0, 0);
+  scheduleRunAtInput.value = toDateTimeLocalValue(next);
+}
+
+function toDateTimeLocalValue(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    "-",
+    pad(date.getMonth() + 1),
+    "-",
+    pad(date.getDate()),
+    "T",
+    pad(date.getHours()),
+    ":",
+    pad(date.getMinutes()),
+  ].join("");
 }
 
 async function refreshMemoryDialog() {
@@ -700,6 +1068,7 @@ async function restoreSession(sessionID) {
   setState("Idle", "Ready", "Ready", "Ready");
   renderTodosPanel();
   refreshMemoryStatus();
+  refreshSchedules();
   renderHistoryPanel();
   addEvent(`Session restored · ${session.title || "Untitled session"}`);
   scrollConversation();
@@ -1031,6 +1400,24 @@ function closeHistoryDialog() {
   historyDialog.removeAttribute("open");
 }
 
+function openScheduleDialog() {
+  if (typeof scheduleDialog.showModal === "function") {
+    if (!scheduleDialog.open) {
+      scheduleDialog.showModal();
+    }
+    return;
+  }
+  scheduleDialog.setAttribute("open", "");
+}
+
+function closeScheduleDialog() {
+  if (typeof scheduleDialog.close === "function" && scheduleDialog.open) {
+    scheduleDialog.close();
+    return;
+  }
+  scheduleDialog.removeAttribute("open");
+}
+
 function openMemoryDialog() {
   if (typeof memoryDialog.showModal === "function") {
     if (!memoryDialog.open) {
@@ -1180,6 +1567,16 @@ function addStreamingAssistantMessage() {
     scrollConversation();
   }
 
+  function setTraceContent(id, content) {
+    if (!traceItems.has(id)) {
+      startTrace(id, "entry", "Trace");
+    }
+    const item = traceItems.get(id);
+    item.content = content;
+    item.body.innerHTML = markdownToHTML(item.content);
+    scrollConversation();
+  }
+
   return {
     remove() {
       wrapper.remove();
@@ -1187,13 +1584,23 @@ function addStreamingAssistantMessage() {
     startTrace,
     appendTrace,
     setTrace(id, content) {
-      if (!traceItems.has(id)) {
-        startTrace(id, "entry", "Trace");
+      setTraceContent(id, content);
+    },
+    setTraceSnapshot(trace) {
+      if (traceDetails) {
+        traceDetails.remove();
       }
-      const item = traceItems.get(id);
-      item.content = content;
-      item.body.innerHTML = markdownToHTML(item.content);
-      scrollConversation();
+      traceDetails = null;
+      traceList = null;
+      traceItems.clear();
+      if (!trace || trace.length === 0) {
+        return;
+      }
+      trace.forEach((item, index) => {
+        const id = `final-trace-${index + 1}`;
+        startTrace(id, item.type || "entry", item.title || "Trace");
+        setTraceContent(id, item.content || "");
+      });
     },
     appendContent(delta) {
       finalContent += delta;
@@ -1243,6 +1650,9 @@ function applyStreamEvent(message, event) {
       message.appendContent(event.delta || "");
       return;
     case "done":
+      if (Array.isArray(event.trace)) {
+        message.setTraceSnapshot(event.trace);
+      }
       message.setContent(event.content || "");
       return;
     case "error":

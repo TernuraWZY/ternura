@@ -80,6 +80,27 @@ func TestBeforeToolCallHookCanBlockExecution(t *testing.T) {
 	if runCtx.ToolCallCount != 1 {
 		t.Fatalf("tool call count = %d, want 1", runCtx.ToolCallCount)
 	}
+	toolResults := runCtx.ToolResults()
+	if len(toolResults) != 1 {
+		t.Fatalf("recorded tool results = %d, want 1", len(toolResults))
+	}
+	if toolResults[0].Error == "" || !strings.Contains(toolResults[0].Content, "blocked by policy") {
+		t.Fatalf("recorded blocked tool result = %+v", toolResults[0])
+	}
+}
+
+func TestFinalizeRunHookCanRewriteResult(t *testing.T) {
+	runCtx := NewRunContext("hello", RunModeSync)
+	result := AgentRunResult{Content: "raw"}
+
+	err := NewHookManager(finalizeHook{}).FinalizeRun(context.Background(), runCtx, &result)
+
+	if err != nil {
+		t.Fatalf("finalize run: %v", err)
+	}
+	if result.Content != "finalized" {
+		t.Fatalf("result content = %q, want finalized", result.Content)
+	}
 }
 
 type blockingToolHook struct{}
@@ -90,6 +111,17 @@ func (blockingToolHook) HookName() string {
 
 func (blockingToolHook) BeforeToolCall(context.Context, *RunContext, *ToolCall) error {
 	return errors.New("blocked by policy")
+}
+
+type finalizeHook struct{}
+
+func (finalizeHook) HookName() string {
+	return "finalizer"
+}
+
+func (finalizeHook) FinalizeRun(_ context.Context, _ *RunContext, result *AgentRunResult) error {
+	result.Content = "finalized"
+	return nil
 }
 
 func testModelConfig() shared.ModelConfig {

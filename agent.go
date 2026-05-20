@@ -125,11 +125,15 @@ func (a *Agent) executeTool(ctx context.Context, runCtx *RunContext, call ToolCa
 	}
 
 	if err := a.hooks.BeforeToolCall(ctx, runCtx, &call); err != nil {
-		return ToolResult{
+		result := ToolResult{
 			Call:    call,
 			Content: err.Error(),
 			Err:     err,
 		}
+		if runCtx != nil {
+			runCtx.recordToolResult(result)
+		}
+		return result
 	}
 
 	content, err := a.execute(ctx, call.Name, call.Arguments)
@@ -145,6 +149,9 @@ func (a *Agent) executeTool(ctx context.Context, runCtx *RunContext, call ToolCa
 	if err := a.hooks.AfterToolCall(ctx, runCtx, &result); err != nil {
 		result.Err = err
 		result.Content = err.Error()
+	}
+	if runCtx != nil {
+		runCtx.recordToolResult(result)
 	}
 	return result
 }
@@ -219,6 +226,9 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 		if len(message.ToolCalls) == 0 {
 			result.RawContent = message.Content
 			result.Content = stripThinkBlocks(message.Content)
+			if err := a.hooks.FinalizeRun(ctx, runCtx, &result); err != nil {
+				return result, err
+			}
 			break
 		}
 
@@ -362,6 +372,9 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 
 		if len(message.ToolCalls) == 0 {
 			result.Content = strings.TrimSpace(result.Content)
+			if err := a.hooks.FinalizeRun(ctx, runCtx, &result); err != nil {
+				return result, err
+			}
 			if err := emit(AgentStreamEvent{
 				Type:       "done",
 				Content:    result.Content,

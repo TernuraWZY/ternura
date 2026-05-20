@@ -196,10 +196,17 @@ func (s *sessionStore) Load() error {
 }
 
 func (s *sessionStore) StartRun(run runLifecycle, userMessage string) error {
+	return s.StartRunForSession("", run, userMessage)
+}
+
+func (s *sessionStore) StartRunForSession(sessionID string, run runLifecycle, userMessage string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	session := s.currentSessionLocked()
+	session, err := s.sessionForRunLocked(sessionID)
+	if err != nil {
+		return err
+	}
 	if isUntitledSession(session.Title) {
 		session.Title = sessionTitle(userMessage)
 	}
@@ -214,10 +221,17 @@ func (s *sessionStore) StartRun(run runLifecycle, userMessage string) error {
 }
 
 func (s *sessionStore) FinishRun(run runLifecycle, userMessage string, result ternura.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
+	return s.FinishRunForSession("", run, userMessage, result, status, finishedAt, runErr)
+}
+
+func (s *sessionStore) FinishRunForSession(sessionID string, run runLifecycle, userMessage string, result ternura.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	session := s.currentSessionLocked()
+	session, err := s.sessionForRunLocked(sessionID)
+	if err != nil {
+		return err
+	}
 	if isUntitledSession(session.Title) {
 		session.Title = sessionTitle(userMessage)
 	}
@@ -315,16 +329,34 @@ func (s *sessionStore) Clear() error {
 }
 
 func (s *sessionStore) ReplaceTodos(todos []persistedTodo) (sessionSnapshot, error) {
+	return s.ReplaceTodosForSession("", todos)
+}
+
+func (s *sessionStore) ReplaceTodosForSession(sessionID string, todos []persistedTodo) (sessionSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	session := s.currentSessionLocked()
+	session, err := s.sessionForRunLocked(sessionID)
+	if err != nil {
+		return sessionSnapshot{}, err
+	}
 	session.Todos = cloneTodos(todos)
 	session.UpdatedAt = time.Now().Format(time.RFC3339Nano)
 	if err := s.saveLocked(); err != nil {
 		return sessionSnapshot{}, err
 	}
 	return cloneSnapshot(s.snapshot), nil
+}
+
+func (s *sessionStore) sessionForRunLocked(sessionID string) (*persistedSession, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return s.currentSessionLocked(), nil
+	}
+	if session := s.findSessionLocked(sessionID); session != nil {
+		return session, nil
+	}
+	return nil, fmt.Errorf("session %q not found", sessionID)
 }
 
 func (s *sessionStore) currentSessionLocked() *persistedSession {
