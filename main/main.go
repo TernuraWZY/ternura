@@ -16,6 +16,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"ternura"
+	"ternura/main/cron"
 	"ternura/shared"
 	"ternura/tool"
 )
@@ -35,7 +36,7 @@ func main() {
 
 	if *serve {
 		server := newAgentServer(modelConf)
-		go newScheduleRunner(server).Run(ctx)
+		go newCronRunner(server).Run(ctx)
 		log.Printf("serving Ternura console on http://localhost%s", *addr)
 		if err := http.ListenAndServe(*addr, server.routes()); err != nil {
 			log.Fatalf("server error: %v", err)
@@ -43,7 +44,7 @@ func main() {
 		return
 	}
 
-	agent := ternura.NewAgent(modelConf, ternura.TernuraAgentSystemPrompt, newAgentTools(nil, nil, nil, nil, nil))
+	agent := ternura.NewAgent(modelConf, ternura.TernuraAgentSystemPrompt, newAgentTools(nil, nil, nil, tool.NewCronTool(nil, nil, nil)))
 	result, err := agent.RunWithTrace(ctx, *query)
 	if err != nil {
 		log.Printf("agent run error: %v", err)
@@ -62,7 +63,26 @@ type agentServer struct {
 	agent     *ternura.Agent
 	store     *sessionStore
 	memory    *memoryStore
-	schedules *scheduleStore
+	cron      *cron.Service
+	cronTool  *tool.CronTool
+	cronWake  chan struct{}
+}
+
+type scheduleCreateRequest struct {
+	Title        string `json:"title,omitempty"`
+	Prompt       string `json:"prompt"`
+	RunAt        string `json:"run_at,omitempty"`
+	DelaySeconds int    `json:"delay_seconds,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+}
+
+type scheduleCancelRequest struct {
+	ID string `json:"id"`
+}
+
+type schedulesResponse struct {
+	CurrentSessionID string            `json:"current_session_id"`
+	Tasks            []cron.LegacyTask `json:"tasks"`
 }
 
 type chatRequest struct {
@@ -89,14 +109,16 @@ func newAgentServer(modelConf shared.ModelConfig) *agentServer {
 	s := &agentServer{
 		modelConf: modelConf,
 		store:     newSessionStore(defaultSessionPath),
+		cronWake:  make(chan struct{}, 1),
 	}
 	s.memory = newMemoryStore(s.store.root)
-	s.schedules = newScheduleStore(s.store.root)
+	s.cron = cron.NewService(s.store.root)
+	s.cronTool = tool.NewCronTool(s.cronAdd, s.cronList, s.cronRemove)
 	if err := s.store.Load(); err != nil {
 		log.Printf("load persisted session: %v", err)
 	}
-	if err := s.schedules.Load(); err != nil {
-		log.Printf("load schedules: %v", err)
+	if err := s.cron.Load(); err != nil {
+		log.Printf("load cron jobs: %v", err)
 	}
 	s.resetAgentFromHistory()
 	return s
@@ -160,13 +182,9 @@ func (s *agentServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		logRunFinish(run, status, finished)
 		if persistErr := s.store.FinishRun(run, req.Message, result, status, finished, err); persistErr != nil {
-			log.Printf("persist shortcut run %s: %v", run.ID, persistErr)
+			log.Printf("persist schedule shortcut run %s: %v", run.ID, persistErr)
 		}
-		resp := chatResponse{
-			Content:    result.Content,
-			Trace:      result.Trace,
-			RawContent: result.RawContent,
-		}
+		resp := chatResponse{Content: result.Content, Trace: result.Trace, RawContent: result.RawContent}
 		if err != nil {
 			resp.Error = err.Error()
 		}
@@ -270,14 +288,11 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 		logRunFinish(run, status, finished)
 		if persistErr := s.store.FinishRun(run, req.Message, result, status, finished, err); persistErr != nil {
-			log.Printf("persist shortcut run %s: %v", run.ID, persistErr)
+			log.Printf("persist schedule shortcut run %s: %v", run.ID, persistErr)
 		}
 		_ = emit(run.finishEvent(eventType, status, finished, err))
 		if err != nil {
-			_ = emit(ternura.AgentStreamEvent{
-				Type:  eventTypeError,
-				Error: err.Error(),
-			})
+			_ = emit(ternura.AgentStreamEvent{Type: eventTypeError, Error: err.Error()})
 		}
 		return
 	}
@@ -667,15 +682,19 @@ func (s *agentServer) handleSchedules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("session %q not found", sessionID), http.StatusNotFound)
 			return
 		}
-		if _, err := s.schedules.Create(r.Context(), sessionID, tool.ScheduleTaskInput{
-			Title:        req.Title,
-			Prompt:       req.Prompt,
-			RunAt:        req.RunAt,
-			DelaySeconds: req.DelaySeconds,
+		if _, err := s.cron.Add(r.Context(), cron.AddParams{
+			Name:           req.Title,
+			Message:        req.Prompt,
+			SessionID:      sessionID,
+			At:             req.RunAt,
+			DelaySeconds:   req.DelaySeconds,
+			DeleteAfterRun: true,
+			Deliver:        true,
 		}); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.wakeCronRunner()
 		writeSchedulesJSON(w, http.StatusCreated, s.schedulesResponse())
 	case http.MethodDelete:
 		var req scheduleCancelRequest
@@ -683,10 +702,11 @@ func (s *agentServer) handleSchedules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		if _, err := s.schedules.Cancel(r.Context(), req.ID); err != nil {
+		if _, err := s.cron.Cancel(r.Context(), req.ID); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.wakeCronRunner()
 		writeSchedulesJSON(w, http.StatusOK, s.schedulesResponse())
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -696,7 +716,7 @@ func (s *agentServer) handleSchedules(w http.ResponseWriter, r *http.Request) {
 func (s *agentServer) schedulesResponse() schedulesResponse {
 	return schedulesResponse{
 		CurrentSessionID: s.store.CurrentSessionID(),
-		Tasks:            s.schedules.Snapshot(),
+		Tasks:            s.cron.LegacySnapshot(),
 	}
 }
 
@@ -760,12 +780,12 @@ func (s *agentServer) resetAgent() {
 	s.agent = ternura.NewAgent(
 		s.modelConf,
 		ternura.TernuraAgentSystemPrompt,
-		newAgentTools(s.updateTodos, s.rememberMemory, s.forgetMemory, s.scheduleTask, s.cancelScheduledTask),
+		newAgentTools(s.updateTodos, s.rememberMemory, s.forgetMemory, s.cronTool),
 		ternura.WithHooks(
 			newCurrentTimeHook(),
 			newMemoryHook(s.memory, s.store.CurrentSessionID),
 			newScheduleGuidanceHook(),
-			newStateGuardHook(s.schedules),
+			newStateGuardHook(s.cron),
 		),
 	)
 }

@@ -32,10 +32,19 @@ type persistedMessage struct {
 	Content string `json:"content"`
 }
 
+// runTriggerKind 标记某次 run 是由谁触发的。空字符串/"user" 表示常规用户输入，
+// "schedule" 表示由后台定时任务触发——前端需要据此把"YOU"气泡换成"⏰ 定时触发"banner，
+// 避免把系统注入的 prompt 误显示成用户原话。
+const (
+	runTriggerKindUser     = "user"
+	runTriggerKindSchedule = "schedule"
+)
+
 type persistedRun struct {
 	RunID       string                   `json:"run_id"`
 	Status      string                   `json:"status"`
 	UserMessage string                   `json:"user_message"`
+	TriggerKind string                   `json:"trigger_kind,omitempty"`
 	Content     string                   `json:"content,omitempty"`
 	Trace       []ternura.AgentTraceItem `json:"trace,omitempty"`
 	RawContent  string                   `json:"raw_content,omitempty"`
@@ -200,6 +209,17 @@ func (s *sessionStore) StartRun(run runLifecycle, userMessage string) error {
 }
 
 func (s *sessionStore) StartRunForSession(sessionID string, run runLifecycle, userMessage string) error {
+	return s.startRunLocked(sessionID, run, userMessage, runTriggerKindUser)
+}
+
+// StartScheduledRunForSession 用于后台定时任务到点触发的 run：把展示给用户的原始 prompt 写入
+// run.UserMessage，并打上 TriggerKind=schedule 让前端渲染成 banner 而不是 YOU 气泡。
+// 它不会更新 session 标题（避免被自动触发的 prompt 覆盖用户首次输入的标题）。
+func (s *sessionStore) StartScheduledRunForSession(sessionID string, run runLifecycle, displayPrompt string) error {
+	return s.startRunLocked(sessionID, run, displayPrompt, runTriggerKindSchedule)
+}
+
+func (s *sessionStore) startRunLocked(sessionID string, run runLifecycle, displayMessage string, triggerKind string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -207,14 +227,16 @@ func (s *sessionStore) StartRunForSession(sessionID string, run runLifecycle, us
 	if err != nil {
 		return err
 	}
-	if isUntitledSession(session.Title) {
-		session.Title = sessionTitle(userMessage)
+	// 仅常规用户输入时根据 prompt 自动命名 session，避免定时触发的 prompt 改写历史 session 标题。
+	if triggerKind != runTriggerKindSchedule && isUntitledSession(session.Title) {
+		session.Title = sessionTitle(displayMessage)
 	}
 	session.UpdatedAt = run.StartedAt.Format(time.RFC3339Nano)
 	upsertRun(session, persistedRun{
 		RunID:       run.ID,
 		Status:      runStatusRunning,
-		UserMessage: userMessage,
+		UserMessage: displayMessage,
+		TriggerKind: normalizeTriggerKind(triggerKind),
 		StartedAt:   run.StartedAt.Format(time.RFC3339Nano),
 	})
 	return s.saveLocked()
@@ -225,6 +247,18 @@ func (s *sessionStore) FinishRun(run runLifecycle, userMessage string, result te
 }
 
 func (s *sessionStore) FinishRunForSession(sessionID string, run runLifecycle, userMessage string, result ternura.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
+	return s.finishRunLocked(sessionID, run, userMessage, userMessage, runTriggerKindUser, result, status, finishedAt, runErr)
+}
+
+// FinishScheduledRunForSession 把定时触发的 run 写回 session：
+//   - displayPrompt 写入 run.UserMessage，让前端展示自然语言的提醒文本；
+//   - runtimePrompt 才是真正塞进 LLM messages 历史的 user 内容（一般是带 "[cron job fired]" 前缀的包装版本），
+//     这样后续轮次模型能清楚分辨"用户原话"和"系统触发的指令"。
+func (s *sessionStore) FinishScheduledRunForSession(sessionID string, run runLifecycle, displayPrompt string, runtimePrompt string, result ternura.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
+	return s.finishRunLocked(sessionID, run, displayPrompt, runtimePrompt, runTriggerKindSchedule, result, status, finishedAt, runErr)
+}
+
+func (s *sessionStore) finishRunLocked(sessionID string, run runLifecycle, displayMessage string, runtimeMessage string, triggerKind string, result ternura.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -232,15 +266,16 @@ func (s *sessionStore) FinishRunForSession(sessionID string, run runLifecycle, u
 	if err != nil {
 		return err
 	}
-	if isUntitledSession(session.Title) {
-		session.Title = sessionTitle(userMessage)
+	if triggerKind != runTriggerKindSchedule && isUntitledSession(session.Title) {
+		session.Title = sessionTitle(displayMessage)
 	}
 	session.UpdatedAt = finishedAt.Format(time.RFC3339Nano)
 
 	item := persistedRun{
 		RunID:       run.ID,
 		Status:      status,
-		UserMessage: userMessage,
+		UserMessage: displayMessage,
+		TriggerKind: normalizeTriggerKind(triggerKind),
 		Content:     result.Content,
 		Trace:       result.Trace,
 		RawContent:  result.RawContent,
@@ -255,11 +290,20 @@ func (s *sessionStore) FinishRunForSession(sessionID string, run runLifecycle, u
 	upsertRun(session, item)
 	if status == runStatusSucceeded && result.Content != "" {
 		session.Messages = append(session.Messages,
-			persistedMessage{Role: "user", Content: userMessage},
+			persistedMessage{Role: "user", Content: runtimeMessage},
 			persistedMessage{Role: "assistant", Content: result.Content},
 		)
 	}
 	return s.saveLocked()
+}
+
+// normalizeTriggerKind 把内部使用的默认值("user")规整为空字符串，
+// 让 omitempty JSON 序列化时不会污染旧的常规 run 数据。
+func normalizeTriggerKind(kind string) string {
+	if kind == runTriggerKindUser {
+		return ""
+	}
+	return kind
 }
 
 func (s *sessionStore) Snapshot() sessionSnapshot {

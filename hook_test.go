@@ -43,6 +43,75 @@ func TestChatCompletionParamsFilterDisabledTools(t *testing.T) {
 	}
 }
 
+func TestChatCompletionParamsDefaultsToolChoiceToAuto(t *testing.T) {
+	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
+	runCtx := NewRunContext("hello", RunModeSync)
+
+	params := agent.newChatCompletionParams(runCtx)
+
+	if params.ToolChoice.OfFunctionToolChoice != nil {
+		t.Fatalf("expected no specific tool choice by default, got %+v", params.ToolChoice.OfFunctionToolChoice)
+	}
+	if params.ToolChoice.OfAuto.Valid() {
+		t.Fatalf("expected OfAuto to be unset, got %q", params.ToolChoice.OfAuto.Value)
+	}
+}
+
+func TestChatCompletionParamsAppliesSpecificToolChoice(t *testing.T) {
+	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
+	runCtx := NewRunContext("run command", RunModeSync)
+	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceSpecific, Name: tool.AgentToolBash})
+
+	params := agent.newChatCompletionParams(runCtx)
+
+	if params.ToolChoice.OfFunctionToolChoice == nil {
+		t.Fatalf("expected specific tool choice to be set")
+	}
+	if got := params.ToolChoice.OfFunctionToolChoice.Function.Name; got != string(tool.AgentToolBash) {
+		t.Fatalf("tool choice name = %q, want %q", got, string(tool.AgentToolBash))
+	}
+}
+
+func TestChatCompletionParamsAppliesRequiredToolChoice(t *testing.T) {
+	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
+	runCtx := NewRunContext("run command", RunModeSync)
+	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceRequired})
+
+	params := agent.newChatCompletionParams(runCtx)
+
+	if !params.ToolChoice.OfAuto.Valid() {
+		t.Fatalf("expected OfAuto to be set to \"required\"")
+	}
+	if got := params.ToolChoice.OfAuto.Value; got != "required" {
+		t.Fatalf("tool choice = %q, want \"required\"", got)
+	}
+}
+
+func TestChatCompletionParamsDropsToolChoiceWhenTargetUnavailable(t *testing.T) {
+	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
+	runCtx := NewRunContext("run command", RunModeSync)
+	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceSpecific, Name: tool.AgentToolRead})
+
+	params := agent.newChatCompletionParams(runCtx)
+
+	if params.ToolChoice.OfFunctionToolChoice != nil {
+		t.Fatalf("expected tool choice to be dropped when target unavailable, got %+v", params.ToolChoice.OfFunctionToolChoice)
+	}
+}
+
+func TestChatCompletionParamsDropsToolChoiceWhenTargetDisabled(t *testing.T) {
+	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
+	runCtx := NewRunContext("run command", RunModeSync)
+	runCtx.DisableTool(tool.AgentToolBash, "shell disabled")
+	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceSpecific, Name: tool.AgentToolBash})
+
+	params := agent.newChatCompletionParams(runCtx)
+
+	if params.ToolChoice.OfFunctionToolChoice != nil {
+		t.Fatalf("expected tool choice to be dropped when target disabled, got %+v", params.ToolChoice.OfFunctionToolChoice)
+	}
+}
+
 func TestRuntimeContextDoesNotAddSecondSystemMessage(t *testing.T) {
 	agent := NewAgent(testModelConfig(), "system", nil)
 	agent.RestoreConversation([]ConversationMessage{

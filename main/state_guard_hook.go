@@ -8,17 +8,18 @@ import (
 	"strings"
 
 	"ternura"
+	"ternura/main/cron"
 	"ternura/tool"
 )
 
-var scheduleIDPattern = regexp.MustCompile(`schedule-\d{8}T\d{6}(?:\.\d{1,9})?`)
+var cronJobIDPattern = regexp.MustCompile(`(?:(?:cron|schedule)-\d{8}T\d{6}(?:\.\d{1,9})?)`)
 
 type stateGuardHook struct {
-	schedules *scheduleStore
+	cron *cron.Service
 }
 
-func newStateGuardHook(schedules *scheduleStore) *stateGuardHook {
-	return &stateGuardHook{schedules: schedules}
+func newStateGuardHook(cronService *cron.Service) *stateGuardHook {
+	return &stateGuardHook{cron: cronService}
 }
 
 func (h *stateGuardHook) HookName() string {
@@ -57,10 +58,10 @@ type scheduleGroundingDecision struct {
 
 func (h *stateGuardHook) checkScheduleGrounding(run *ternura.RunContext, result *ternura.AgentRunResult) scheduleGroundingDecision {
 	content := strings.TrimSpace(result.Content)
-	claimedIDs := uniqueStrings(scheduleIDPattern.FindAllString(content, -1))
-	successfulTools := h.successfulScheduleToolIDs(run, result)
+	claimedIDs := uniqueStrings(cronJobIDPattern.FindAllString(content, -1))
+	successfulTools := h.successfulCronToolIDs(run, result)
 	successfulSet := stringSet(successfulTools)
-	knownSet := h.knownScheduleIDSet()
+	knownSet := h.knownCronJobIDSet()
 	for id := range successfulSet {
 		knownSet[id] = struct{}{}
 	}
@@ -73,7 +74,7 @@ func (h *stateGuardHook) checkScheduleGrounding(run *ternura.RunContext, result 
 	}
 
 	claimsSuccess := looksLikeScheduleSuccess(content)
-	if claimsSuccess && len(ungrounded) > 0 {
+	if len(ungrounded) > 0 && (claimsSuccess || presentsScheduleJobID(content)) {
 		return scheduleGroundingDecision{
 			Block:           true,
 			ClaimedIDs:      claimedIDs,
@@ -82,7 +83,7 @@ func (h *stateGuardHook) checkScheduleGrounding(run *ternura.RunContext, result 
 		}
 	}
 
-	if claimsSuccess && len(successfulTools) == 0 && len(claimedIDs) == 0 && looksLikeScheduleIntent(run.Query) {
+	if claimsSuccess && len(successfulTools) == 0 && len(claimedIDs) == 0 && looksLikeConcreteScheduleIntent(run.Query) {
 		return scheduleGroundingDecision{
 			Block:           true,
 			ClaimedIDs:      claimedIDs,
@@ -98,36 +99,36 @@ func (h *stateGuardHook) checkScheduleGrounding(run *ternura.RunContext, result 
 	}
 }
 
-func (h *stateGuardHook) successfulScheduleToolIDs(run *ternura.RunContext, result *ternura.AgentRunResult) []string {
+func (h *stateGuardHook) successfulCronToolIDs(run *ternura.RunContext, result *ternura.AgentRunResult) []string {
 	ids := make([]string, 0)
 	if run != nil {
 		for _, item := range run.ToolResults() {
-			if item.Call.Name != string(tool.AgentToolScheduleTask) || item.Error != "" {
+			if item.Call.Name != string(tool.AgentToolCron) || item.Error != "" {
 				continue
 			}
-			ids = append(ids, scheduleIDPattern.FindAllString(item.Content, -1)...)
+			ids = append(ids, cronJobIDPattern.FindAllString(item.Content, -1)...)
 		}
 	}
 	if result != nil {
 		for _, item := range result.Trace {
-			if item.Title != "Tool use: "+string(tool.AgentToolScheduleTask) {
+			if item.Title != "Tool use: "+string(tool.AgentToolCron) {
 				continue
 			}
 			if strings.Contains(item.Content, "**Error**") {
 				continue
 			}
-			ids = append(ids, scheduleIDPattern.FindAllString(item.Content, -1)...)
+			ids = append(ids, cronJobIDPattern.FindAllString(item.Content, -1)...)
 		}
 	}
 	return uniqueStrings(ids)
 }
 
-func (h *stateGuardHook) knownScheduleIDSet() map[string]struct{} {
+func (h *stateGuardHook) knownCronJobIDSet() map[string]struct{} {
 	ids := make(map[string]struct{})
-	if h == nil || h.schedules == nil {
+	if h == nil || h.cron == nil {
 		return ids
 	}
-	for _, task := range h.schedules.Snapshot() {
+	for _, task := range h.cron.LegacySnapshot() {
 		if task.ID != "" {
 			ids[task.ID] = struct{}{}
 		}
@@ -141,7 +142,7 @@ func looksLikeScheduleIntent(query string) bool {
 		return true
 	}
 	keywords := []string{
-		"定时", "稍后", "以后", "之后", "明天", "后天", "每天", "每周", "到点",
+		"定时", "稍后", "以后", "之后", "明天", "后天", "每天", "每周", "到点", "等一会",
 		"schedule", "scheduled", "later", "tomorrow", "timer", "alarm",
 	}
 	for _, keyword := range keywords {
@@ -155,8 +156,9 @@ func looksLikeScheduleIntent(query string) bool {
 func looksLikeScheduleSuccess(content string) bool {
 	lower := strings.ToLower(content)
 	phrases := []string{
-		"已设置", "已经设置", "设置好了", "已创建", "创建成功", "后台任务已", "到时候会提醒", "会提醒你", "我会提醒",
-		"has been scheduled", "is scheduled", "i've scheduled", "schedule created", "created the scheduled task", "reminder is set", "i'll remind", "i will remind", "will remind you",
+		"已设置", "已经设置", "设置好了", "已创建", "创建成功", "后台任务已", "到时候会提醒",
+		"has been scheduled", "is scheduled", "i've scheduled", "schedule created", "created the scheduled task", "reminder is set",
+		"created job",
 	}
 	for _, phrase := range phrases {
 		if strings.Contains(lower, strings.ToLower(phrase)) {
@@ -166,22 +168,27 @@ func looksLikeScheduleSuccess(content string) bool {
 	return false
 }
 
+func presentsScheduleJobID(content string) bool {
+	lower := strings.ToLower(content)
+	return strings.Contains(lower, "任务 id") || strings.Contains(lower, "job id")
+}
+
 func (d scheduleGroundingDecision) UserMessage() string {
 	if len(d.UngroundedIDs) > 0 {
-		return fmt.Sprintf("我没有找到真实创建成功的定时任务记录，所以不会把 `%s` 当成有效任务 ID。\n\n请重新发送提醒请求，我会通过 `schedule_task` 创建并返回后端确认的 ID。", strings.Join(d.UngroundedIDs, "`, `"))
+		return fmt.Sprintf("我没有找到真实创建成功的定时任务记录，所以不会把 `%s` 当成有效任务 ID。\n\n请重新发送提醒请求，我会通过 `cron` 工具创建并返回后端确认的 ID。", strings.Join(d.UngroundedIDs, "`, `"))
 	}
-	return "我没有检测到真实的 `schedule_task` 工具执行结果，所以不会把这次回复当成已设置成功。\n\n请重新发送提醒请求，我会通过后端定时任务工具创建并返回确认 ID。"
+	return "我没有检测到真实的 `cron` 工具执行结果，所以不会把这次回复当成已设置成功。\n\n请重新发送提醒请求，我会通过 cron 工具创建并返回确认 ID。"
 }
 
 func (d scheduleGroundingDecision) TraceContent() string {
 	sections := []string{
 		"**Reason**",
 		"",
-		"Final answer claimed a scheduled task was created, but the claim was not grounded in a successful `schedule_task` result.",
+		"Final answer claimed a scheduled task was created, but the claim was not grounded in a successful `cron` result.",
 		"",
 	}
 	if len(d.ClaimedIDs) > 0 {
-		sections = append(sections, "**Claimed schedule IDs**", "", "`"+strings.Join(d.ClaimedIDs, "`, `")+"`", "")
+		sections = append(sections, "**Claimed job IDs**", "", "`"+strings.Join(d.ClaimedIDs, "`, `")+"`", "")
 	}
 	if len(d.UngroundedIDs) > 0 {
 		sections = append(sections, "**Ungrounded IDs**", "", "`"+strings.Join(d.UngroundedIDs, "`, `")+"`", "")

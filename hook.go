@@ -22,6 +22,24 @@ type RuntimeContextBlock struct {
 	Content string
 }
 
+// ToolChoiceMode 表示本次模型调用对 tool 选择的约束强度。
+// - Auto：默认，等价于不设置 tool_choice，由模型自己决定是否调工具。
+// - Required：必须调任意一个可用工具，不能纯文本回答。
+// - Specific：必须调用 Name 指定的那个工具。
+type ToolChoiceMode string
+
+const (
+	ToolChoiceAuto     ToolChoiceMode = "auto"
+	ToolChoiceRequired ToolChoiceMode = "required"
+	ToolChoiceSpecific ToolChoiceMode = "specific"
+)
+
+// ToolChoice 描述一次模型调用希望强制的 tool 选择。Mode 为 Specific 时 Name 必填。
+type ToolChoice struct {
+	Mode ToolChoiceMode
+	Name tool.AgentTool
+}
+
 type RunContext struct {
 	Query          string
 	Mode           RunMode
@@ -32,6 +50,7 @@ type RunContext struct {
 	contextBlocks []RuntimeContextBlock
 	disabledTools map[tool.AgentTool]string
 	toolResults   []ToolExecution
+	toolChoice    ToolChoice
 }
 
 func NewRunContext(query string, mode RunMode) *RunContext {
@@ -41,6 +60,35 @@ func NewRunContext(query string, mode RunMode) *RunContext {
 		Metadata:      make(map[string]any),
 		disabledTools: make(map[tool.AgentTool]string),
 	}
+}
+
+// SetToolChoice 写入本轮模型调用希望强制的 tool 选择。
+// hook 通常应该只在 ModelCallCount == 1（首轮）设置 Required/Specific，
+// 工具返回后让 agent loop 自动回到 Auto，避免被迫死循环调工具。
+func (r *RunContext) SetToolChoice(choice ToolChoice) {
+	if r == nil {
+		return
+	}
+	if choice.Mode == ToolChoiceSpecific && strings.TrimSpace(string(choice.Name)) == "" {
+		return
+	}
+	r.toolChoice = choice
+}
+
+// ClearToolChoice 把强制选择清空，回到默认的 Auto 行为。
+func (r *RunContext) ClearToolChoice() {
+	if r == nil {
+		return
+	}
+	r.toolChoice = ToolChoice{}
+}
+
+// RequestedToolChoice 返回当前 RunContext 持有的强制 tool 选择，未设置时返回零值（Auto）。
+func (r *RunContext) RequestedToolChoice() ToolChoice {
+	if r == nil {
+		return ToolChoice{}
+	}
+	return r.toolChoice
 }
 
 func (r *RunContext) SetContextBlock(key string, title string, content string) {

@@ -1235,6 +1235,42 @@ textarea {
   background: var(--thinking-bg);
 }
 
+/* 定时任务触发的提示徽章：替代假"YOU"气泡，明确标记下方的 TERNURA 回复是后台触发而非用户发起 */
+.schedule-trigger {
+  align-self: center;
+  max-width: 70%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.85rem 0.55rem;
+  margin: 0.25rem 0;
+  border-radius: 999px;
+  border: 1px dashed var(--trace-line);
+  background: transparent;
+  color: var(--text-muted, var(--text-dim, #8a93a7));
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+}
+
+.schedule-trigger-badge {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  opacity: 0.85;
+}
+
+.schedule-trigger-body {
+  text-align: center;
+  line-height: 1.4;
+  color: var(--text-dim, #aab1c4);
+}
+
+.schedule-trigger-body p {
+  margin: 0;
+}
+
 .message-highlight {
   outline: 2px solid var(--teal);
   outline-offset: 3px;

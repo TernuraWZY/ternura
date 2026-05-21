@@ -190,6 +190,7 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 		if err := a.hooks.BeforeModelCall(ctx, runCtx); err != nil {
 			return result, err
 		}
+		forcedToolChoice := runCtx.RequestedToolChoice()
 		params := a.newChatCompletionParams(runCtx)
 
 		log.Printf("calling llm model %s...", a.model)
@@ -224,6 +225,9 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 
 		// tool loop 结束，可以返回结果
 		if len(message.ToolCalls) == 0 {
+			if a.retryIgnoredToolChoice(ctx, runCtx, forcedToolChoice) {
+				continue
+			}
 			result.RawContent = message.Content
 			result.Content = stripThinkBlocks(message.Content)
 			if err := a.hooks.FinalizeRun(ctx, runCtx, &result); err != nil {
@@ -231,6 +235,8 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 			}
 			break
 		}
+
+		runCtx.ClearToolChoice()
 
 		for _, toolCall := range message.ToolCalls {
 			toolResult := a.executeTool(ctx, runCtx, ToolCall{
@@ -279,6 +285,7 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 		if err := a.hooks.BeforeModelCall(ctx, runCtx); err != nil {
 			return result, err
 		}
+		forcedToolChoice := runCtx.RequestedToolChoice()
 		params := a.newChatCompletionParams(runCtx)
 		toolMessages := make([]openai.ChatCompletionMessageParamUnion, 0)
 		executedToolCalls := make(map[string]bool)
@@ -371,6 +378,9 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 		}
 
 		if len(message.ToolCalls) == 0 {
+			if a.retryIgnoredToolChoice(ctx, runCtx, forcedToolChoice) {
+				continue
+			}
 			result.Content = strings.TrimSpace(result.Content)
 			if err := a.hooks.FinalizeRun(ctx, runCtx, &result); err != nil {
 				return result, err
@@ -385,6 +395,8 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 			}
 			return result, nil
 		}
+
+		runCtx.ClearToolChoice()
 
 		for _, toolCall := range message.ToolCalls {
 			if executedToolCalls[toolCall.ID] {
@@ -415,6 +427,7 @@ func (a *Agent) newChatCompletionParams(runCtx *RunContext) openai.ChatCompletio
 		ParallelToolCalls: openai.Bool(false),
 	}
 
+	availableTools := make(map[tool.AgentTool]struct{})
 	for _, t := range a.tools {
 		if runCtx != nil {
 			if _, disabled := runCtx.ToolDisabled(t.ToolName()); disabled {
@@ -422,8 +435,40 @@ func (a *Agent) newChatCompletionParams(runCtx *RunContext) openai.ChatCompletio
 			}
 		}
 		params.Tools = append(params.Tools, t.Info())
+		availableTools[t.ToolName()] = struct{}{}
+	}
+
+	if choice, ok := resolveToolChoice(runCtx, availableTools); ok {
+		params.ToolChoice = choice
 	}
 	return params
+}
+
+// resolveToolChoice 把 RunContext 上的 ToolChoice 翻译成 openai-go 的请求字段。
+// 当目标工具不可用或不在本轮工具集时，会自动降级为不设置（等价 auto），避免请求被服务端 422。
+func resolveToolChoice(runCtx *RunContext, available map[tool.AgentTool]struct{}) (openai.ChatCompletionToolChoiceOptionUnionParam, bool) {
+	if runCtx == nil {
+		return openai.ChatCompletionToolChoiceOptionUnionParam{}, false
+	}
+	choice := runCtx.RequestedToolChoice()
+	switch choice.Mode {
+	case ToolChoiceRequired:
+		if len(available) == 0 {
+			return openai.ChatCompletionToolChoiceOptionUnionParam{}, false
+		}
+		return openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfAuto: openai.String("required"),
+		}, true
+	case ToolChoiceSpecific:
+		if _, ok := available[choice.Name]; !ok {
+			return openai.ChatCompletionToolChoiceOptionUnionParam{}, false
+		}
+		return openai.ToolChoiceOptionFunctionToolChoice(openai.ChatCompletionNamedToolChoiceFunctionParam{
+			Name: string(choice.Name),
+		}), true
+	default:
+		return openai.ChatCompletionToolChoiceOptionUnionParam{}, false
+	}
 }
 
 func (a *Agent) messagesWithRuntimeContext(runCtx *RunContext) []openai.ChatCompletionMessageParamUnion {
@@ -712,4 +757,27 @@ func lastCompleteUTF8Boundary(content string, limit int) int {
 		limit--
 	}
 	return limit
+}
+
+const ignoredToolChoiceRetryKey = "ignored_tool_choice_retry"
+
+// retryIgnoredToolChoice 在模型无视强制 tool_choice 直接文本回复时，追加一次 nudge 并重试。
+func (a *Agent) retryIgnoredToolChoice(_ context.Context, runCtx *RunContext, forced ToolChoice) bool {
+	if runCtx == nil || forced.Mode == "" {
+		return false
+	}
+	if runCtx.Metadata != nil {
+		if retried, ok := runCtx.Metadata[ignoredToolChoiceRetryKey].(bool); ok && retried {
+			return false
+		}
+	}
+	if runCtx.Metadata == nil {
+		runCtx.Metadata = make(map[string]any)
+	}
+	runCtx.Metadata[ignoredToolChoiceRetryKey] = true
+	runCtx.SetToolChoice(forced)
+	a.messages = append(a.messages, openai.UserMessage(
+		"You must call the required tool before claiming the action succeeded. Call it now with valid arguments.",
+	))
+	return true
 }

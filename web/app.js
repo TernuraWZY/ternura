@@ -45,6 +45,7 @@ const THEME_STORAGE_KEY = "ternura-theme";
 const LIGHT_THEME = "light";
 const DARK_THEME = "dark";
 const COMPOSITION_SETTLE_MS = 150;
+const SCHEDULE_REFRESH_INTERVAL_MS = 5000;
 
 let controller = null;
 let eventCount = 1;
@@ -345,7 +346,7 @@ promptInput.addEventListener("keydown", (event) => {
 });
 
 loadHistory();
-window.setInterval(refreshSchedules, 15000);
+window.setInterval(refreshSchedules, SCHEDULE_REFRESH_INTERVAL_MS);
 
 function getInitialTheme() {
   return readStoredTheme() || preferredSystemTheme();
@@ -659,6 +660,8 @@ function detectScheduleTerminalChanges(payload) {
     const previous = scheduleSnapshots.get(id);
     const snapshot = {
       status: task.status || "",
+      title: task.title || "",
+      sessionID: task.session_id || "",
       lastRunID: task.last_run_id || "",
       lastError: task.last_error || "",
     };
@@ -675,6 +678,21 @@ function detectScheduleTerminalChanges(payload) {
     }
   });
 
+  if (schedulesHaveLoaded) {
+    scheduleSnapshots.forEach((previous, id) => {
+      if (next.has(id) || !isScheduleActive(previous.status)) {
+        return;
+      }
+      changed.push({
+        id,
+        title: previous.title || id,
+        session_id: previous.sessionID || "",
+        status: "completed",
+        disappeared: true,
+      });
+    });
+  }
+
   scheduleSnapshots.clear();
   next.forEach((value, key) => {
     scheduleSnapshots.set(key, value);
@@ -687,17 +705,21 @@ function isScheduleTerminal(status) {
   return status === "completed" || status === "failed";
 }
 
+function isScheduleActive(status) {
+  return status === "scheduled" || status === "running";
+}
+
 async function syncCompletedSchedules(tasks) {
   if (!tasks.length) {
     return;
   }
 
   tasks.forEach((task) => {
-    const label = task.status === "failed" ? "failed" : "completed";
+    const label = task.disappeared ? "finished" : task.status === "failed" ? "failed" : "completed";
     addEvent(`Schedule ${label} · ${task.title || task.id || "Untitled"}`);
   });
 
-  const currentSessionTask = tasks.find((task) => task.session_id === currentSessionID && task.last_run_id);
+  const currentSessionTask = tasks.find((task) => task.session_id === currentSessionID && (task.last_run_id || task.disappeared));
   try {
     applyHistory(await fetchHistory());
     await refreshMemoryStatus();
@@ -1124,8 +1146,10 @@ function mergeSessionDetail(session) {
 
 function renderPersistedRun(run) {
   if (run.user_message) {
-    const userMessage = addUserMessage(run.user_message);
-    userMessage.dataset.runId = run.run_id || "";
+    const trigger = run.trigger_kind === "schedule"
+      ? addScheduleTrigger(run.user_message)
+      : addUserMessage(run.user_message);
+    trigger.dataset.runId = run.run_id || "";
   }
   const assistantMessage = addAssistantMessage({
     content: restoredRunContent(run),
@@ -1480,6 +1504,23 @@ function addEvent(label) {
 function addUserMessage(text) {
   const wrapper = createMessage("user", "You");
   wrapper.append(renderMarkdown(text));
+  conversation.append(wrapper);
+  return wrapper;
+}
+
+function addScheduleTrigger(text) {
+  const wrapper = document.createElement("article");
+  wrapper.className = "schedule-trigger";
+
+  const badge = document.createElement("span");
+  badge.className = "schedule-trigger-badge";
+  badge.textContent = "⏰ Scheduled trigger";
+
+  const body = document.createElement("div");
+  body.className = "schedule-trigger-body";
+  body.append(renderMarkdown(text));
+
+  wrapper.append(badge, body);
   conversation.append(wrapper);
   return wrapper;
 }
