@@ -1,9 +1,4 @@
 const conversation = document.querySelector("#conversation");
-const composer = document.querySelector("#composer");
-const promptInput = document.querySelector("#promptInput");
-const sendButton = document.querySelector("#sendButton");
-const resetButton = document.querySelector("#resetButton");
-const stopButton = document.querySelector("#stopButton");
 const themeButton = document.querySelector("#themeButton");
 const historyButton = document.querySelector("#historyButton");
 const historyCount = document.querySelector("#historyCount");
@@ -17,10 +12,6 @@ const scheduleCount = document.querySelector("#scheduleCount");
 const scheduleDialog = document.querySelector("#scheduleDialog");
 const scheduleCloseButton = document.querySelector("#scheduleCloseButton");
 const scheduleState = document.querySelector("#scheduleState");
-const scheduleForm = document.querySelector("#scheduleForm");
-const scheduleTitleInput = document.querySelector("#scheduleTitleInput");
-const scheduleRunAtInput = document.querySelector("#scheduleRunAtInput");
-const schedulePromptInput = document.querySelector("#schedulePromptInput");
 const scheduleList = document.querySelector("#scheduleList");
 const memoryButton = document.querySelector("#memoryButton");
 const memoryDialog = document.querySelector("#memoryDialog");
@@ -44,10 +35,8 @@ const AUTO_SCROLL_THRESHOLD = 220;
 const THEME_STORAGE_KEY = "ternura-theme";
 const LIGHT_THEME = "light";
 const DARK_THEME = "dark";
-const COMPOSITION_SETTLE_MS = 150;
 const SCHEDULE_REFRESH_INTERVAL_MS = 5000;
 
-let controller = null;
 let eventCount = 1;
 let followConversation = true;
 let scrollFrame = null;
@@ -58,9 +47,6 @@ const scheduleSnapshots = new Map();
 let currentSessionID = "";
 let schedulesHaveLoaded = false;
 let scheduleRefreshPromise = null;
-let promptInputComposing = false;
-let promptInputLastCompositionAt = 0;
-let promptInputCompositionSettlingUntil = 0;
 const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
 const colorSchemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -81,71 +67,6 @@ conversation.addEventListener("scroll", () => {
   followConversation = isConversationNearBottom();
 }, { passive: true });
 
-composer.addEventListener("submit", (event) => {
-  event.preventDefault();
-});
-
-sendButton.addEventListener("click", (event) => {
-  if (!isIntentionalSendActivation(event)) {
-    return;
-  }
-  submitPrompt();
-});
-
-async function submitPrompt() {
-  const message = promptInput.value.trim();
-  if (!message || controller) {
-    return;
-  }
-
-  promptInput.value = "";
-  const userMessage = addUserMessage(message);
-  scrollToMessage(userMessage);
-  addEvent("Prompt queued");
-  setRunning(true);
-
-  controller = new AbortController();
-  const streamingMessage = addStreamingAssistantMessage();
-
-  try {
-    const response = await fetch("/api/chat/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(text || `Request failed: ${response.status}`);
-    }
-
-    await readEventStream(response, (payload) => {
-      applyStreamEvent(streamingMessage, payload);
-    });
-    addEvent("Response complete");
-  } catch (error) {
-    if (error.name === "AbortError") {
-      streamingMessage.setContent("Request stopped.");
-      completeRunFromClient("cancelled");
-      addEvent("Stopped");
-    } else {
-      streamingMessage.remove();
-      completeRunFromClient("failed");
-      addAssistantMessage(localFallback(message, error.message));
-      addEvent("Local preview");
-    }
-  } finally {
-    controller = null;
-    setRunning(false);
-    if (currentSessionID) {
-      sessionDetails.delete(currentSessionID);
-    }
-    await refreshHistoryPanel();
-    await refreshMemoryStatus();
-  }
-}
-
 historyButton.addEventListener("click", async () => {
   await refreshHistoryPanel();
   openHistoryDialog();
@@ -157,17 +78,11 @@ historyCloseButton.addEventListener("click", () => {
 
 scheduleButton.addEventListener("click", async () => {
   await refreshSchedules();
-  setDefaultScheduleTime();
   openScheduleDialog();
 });
 
 scheduleCloseButton.addEventListener("click", () => {
   closeScheduleDialog();
-});
-
-scheduleForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  await createScheduleFromForm();
 });
 
 memoryButton.addEventListener("click", async () => {
@@ -197,51 +112,6 @@ scheduleDialog.addEventListener("click", (event) => {
   }
 });
 
-scheduleList.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-schedule-cancel]");
-  if (!button) {
-    return;
-  }
-
-  const id = button.dataset.scheduleCancel || "";
-  if (!id || !window.confirm(`Cancel schedule ${id}?`)) {
-    return;
-  }
-
-  button.disabled = true;
-  try {
-    await cancelSchedule(id);
-    addEvent("Schedule cancelled");
-    await refreshSchedules();
-  } catch {
-    button.disabled = false;
-    addEvent("Schedule cancel failed");
-  }
-});
-
-longTermMemoryList.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-memory-delete]");
-  if (!button) {
-    return;
-  }
-
-  const id = button.dataset.memoryDelete || "";
-  if (!id || !window.confirm(`Delete memory ${id}?`)) {
-    return;
-  }
-
-  button.disabled = true;
-  try {
-    await deleteMemory(id);
-    addEvent("Memory deleted");
-    await refreshMemoryStatus();
-    await refreshMemoryDialog();
-  } catch {
-    button.disabled = false;
-    addEvent("Memory delete failed");
-  }
-});
-
 restoreButton.addEventListener("click", async () => {
   await restoreHistory();
   closeHistoryDialog();
@@ -260,89 +130,6 @@ historyList.addEventListener("click", async (event) => {
 
   await selectSession(sessionID);
   closeHistoryDialog();
-});
-
-resetButton.addEventListener("click", async () => {
-  if (scrollFrame) {
-    cancelAnimationFrame(scrollFrame);
-    scrollFrame = null;
-  }
-  conversation.replaceChildren();
-  followConversation = true;
-  eventCount = 0;
-  currentRun = null;
-  eventsList.replaceChildren();
-  addEvent("Ready");
-  setRunState(null);
-  setState("Idle", "Ready", "Ready", "Ready");
-
-  try {
-    const response = await fetch("/api/reset", { method: "POST" });
-    if (!response.ok) {
-      throw new Error(`Reset failed: ${response.status}`);
-    }
-    applyHistory(await response.json());
-    await refreshMemoryStatus();
-    await refreshSchedules();
-  } catch {
-    addEvent("Preview reset");
-  }
-});
-
-stopButton.addEventListener("click", () => {
-  if (controller) {
-    controller.abort();
-  }
-});
-
-promptInput.addEventListener("compositionstart", () => {
-  markPromptInputComposing();
-});
-
-promptInput.addEventListener("compositionupdate", () => {
-  markPromptInputComposing();
-});
-
-promptInput.addEventListener("beforeinput", (event) => {
-  if (event.isComposing || event.inputType === "insertCompositionText") {
-    markPromptInputComposing();
-  }
-});
-
-promptInput.addEventListener("input", (event) => {
-  if (event.isComposing || event.inputType === "insertCompositionText") {
-    markPromptInputComposing();
-  }
-});
-
-promptInput.addEventListener("compositionend", () => {
-  promptInputComposing = false;
-  promptInputCompositionSettlingUntil = window.performance.now() + COMPOSITION_SETTLE_MS;
-});
-
-promptInput.addEventListener("blur", () => {
-  promptInputComposing = false;
-  promptInputCompositionSettlingUntil = 0;
-});
-
-function markPromptInputComposing() {
-  promptInputComposing = true;
-  promptInputLastCompositionAt = window.performance.now();
-  promptInputCompositionSettlingUntil = 0;
-}
-
-promptInput.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    if (isComposingShortcutEvent(event)) {
-      return;
-    }
-    event.preventDefault();
-    if (controller) {
-      controller.abort();
-      return;
-    }
-    promptInput.value = "";
-  }
 });
 
 loadHistory();
@@ -373,23 +160,6 @@ function writeStoredTheme(theme) {
   }
 }
 
-function isComposingShortcutEvent(event) {
-  if (event.key !== "Escape") {
-    return promptInputComposing || event.isComposing || event.keyCode === 229;
-  }
-
-  const now = window.performance.now();
-  return promptInputComposing ||
-    event.isComposing ||
-    event.keyCode === 229 ||
-    now < promptInputCompositionSettlingUntil ||
-    (promptInputLastCompositionAt > 0 && now - promptInputLastCompositionAt < COMPOSITION_SETTLE_MS);
-}
-
-function isIntentionalSendActivation(event) {
-  return event.detail > 0 || document.activeElement === sendButton;
-}
-
 function applyTheme(theme, persist) {
   const nextTheme = theme === DARK_THEME ? DARK_THEME : LIGHT_THEME;
   document.documentElement.dataset.theme = nextTheme;
@@ -400,50 +170,6 @@ function applyTheme(theme, persist) {
   if (persist) {
     writeStoredTheme(nextTheme);
   }
-}
-
-function startRun(event) {
-  currentRun = {
-    id: event.run_id || "",
-    status: event.status || "running",
-    startedAt: event.started_at || "",
-    durationMS: 0,
-  };
-  setRunState(currentRun);
-  setState("Running", "Active", "Writing", "Running");
-  addEvent(`Run started · ${currentRun.id}`);
-}
-
-function finishRun(event) {
-  currentRun = {
-    id: event.run_id || currentRun?.id || "",
-    status: event.status || "succeeded",
-    startedAt: event.started_at || currentRun?.startedAt || "",
-    finishedAt: event.finished_at || "",
-    durationMS: event.duration_ms || 0,
-  };
-  setRunState(currentRun);
-
-  const statusLabel = runStatusLabel(currentRun.status);
-  const duration = formatDuration(currentRun.durationMS);
-  setState("Idle", "Ready", "Ready", `${statusLabel} · ${duration}`);
-  addEvent(`Run ${statusLabel.toLowerCase()} · ${currentRun.id} · ${duration}`);
-}
-
-function completeRunFromClient(status) {
-  if (!currentRun || currentRun.status !== "running") {
-    return;
-  }
-
-  const startedAt = currentRun.startedAt ? Date.parse(currentRun.startedAt) : Date.now();
-  const durationMS = Math.max(0, Date.now() - startedAt);
-  finishRun({
-    run_id: currentRun.id,
-    status,
-    started_at: currentRun.startedAt,
-    finished_at: new Date().toISOString(),
-    duration_ms: durationMS,
-  });
 }
 
 function setRunState(run) {
@@ -492,7 +218,7 @@ async function loadHistory() {
     if (!session || sessionRunCount(session) === 0) {
       return;
     }
-    if (controller || conversation.children.length > 0) {
+    if (conversation.children.length > 0) {
       return;
     }
 
@@ -564,42 +290,6 @@ async function fetchSchedules() {
 
   const schedules = await response.json();
   return schedules && typeof schedules === "object" ? schedules : { tasks: [], current_session_id: "" };
-}
-
-async function createSchedule(payload) {
-  const response = await fetch("/api/schedules", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) {
-    throw new Error(await response.text() || `Schedule create failed: ${response.status}`);
-  }
-  return response.json();
-}
-
-async function cancelSchedule(id) {
-  const response = await fetch("/api/schedules", {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id }),
-  });
-  if (!response.ok) {
-    throw new Error(await response.text() || `Schedule cancel failed: ${response.status}`);
-  }
-  return response.json();
-}
-
-async function deleteMemory(id) {
-  const response = await fetch("/api/memory", {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id }),
-  });
-  if (!response.ok) {
-    throw new Error(`Memory delete failed: ${response.status}`);
-  }
-  return response.json();
 }
 
 async function refreshMemoryStatus(sessionID = currentSessionID) {
@@ -728,7 +418,7 @@ async function syncCompletedSchedules(tasks) {
     return;
   }
 
-  if (!currentSessionTask || controller) {
+  if (!currentSessionTask) {
     if (currentSessionTask) {
       addEvent("Scheduled result ready");
     }
@@ -752,40 +442,6 @@ function renderSchedules(payload) {
     return;
   }
   scheduleList.replaceChildren(...tasks.map(renderScheduleTask));
-}
-
-async function createScheduleFromForm() {
-  const prompt = schedulePromptInput.value.trim();
-  const runAtValue = scheduleRunAtInput.value;
-  if (!prompt || !runAtValue) {
-    addEvent("Schedule details required");
-    return;
-  }
-
-  const runAt = new Date(runAtValue);
-  if (Number.isNaN(runAt.getTime())) {
-    addEvent("Schedule time invalid");
-    return;
-  }
-
-  const button = scheduleForm.querySelector("button[type='submit']");
-  button.disabled = true;
-  try {
-    await createSchedule({
-      title: scheduleTitleInput.value.trim(),
-      prompt,
-      run_at: runAt.toISOString(),
-      session_id: currentSessionID,
-    });
-    scheduleForm.reset();
-    setDefaultScheduleTime();
-    addEvent("Schedule created");
-    await refreshSchedules();
-  } catch {
-    addEvent("Schedule create failed");
-  } finally {
-    button.disabled = false;
-  }
 }
 
 function renderScheduleTask(task) {
@@ -817,15 +473,6 @@ function renderScheduleTask(task) {
   meta.textContent = scheduleMeta(task);
 
   footer.append(meta);
-  if (task.status === "scheduled") {
-    const cancelButton = document.createElement("button");
-    cancelButton.className = "schedule-cancel-button";
-    cancelButton.type = "button";
-    cancelButton.dataset.scheduleCancel = task.id || "";
-    cancelButton.textContent = "Cancel";
-    cancelButton.disabled = !task.id;
-    footer.append(cancelButton);
-  }
 
   if (task.last_error) {
     const error = document.createElement("p");
@@ -889,30 +536,6 @@ function scheduleMeta(task) {
     parts.push(task.id);
   }
   return parts.join(" · ");
-}
-
-function setDefaultScheduleTime() {
-  if (scheduleRunAtInput.value) {
-    return;
-  }
-  const next = new Date(Date.now() + 10 * 60 * 1000);
-  next.setSeconds(0, 0);
-  scheduleRunAtInput.value = toDateTimeLocalValue(next);
-}
-
-function toDateTimeLocalValue(date) {
-  const pad = (value) => String(value).padStart(2, "0");
-  return [
-    date.getFullYear(),
-    "-",
-    pad(date.getMonth() + 1),
-    "-",
-    pad(date.getDate()),
-    "T",
-    pad(date.getHours()),
-    ":",
-    pad(date.getMinutes()),
-  ].join("");
 }
 
 async function refreshMemoryDialog() {
@@ -981,14 +604,7 @@ function renderLongTermMemory(memory) {
   meta.className = "memory-meta";
   meta.textContent = memory.updated_at ? `Updated ${formatMemoryDate(memory.updated_at)}` : "";
 
-  const deleteButton = document.createElement("button");
-  deleteButton.className = "memory-delete-button";
-  deleteButton.type = "button";
-  deleteButton.dataset.memoryDelete = memory.id || "";
-  deleteButton.textContent = "Delete";
-  deleteButton.disabled = !memory.id;
-
-  footer.append(meta, deleteButton);
+  footer.append(meta);
   item.append(header, content, footer);
   return item;
 }
@@ -1059,7 +675,7 @@ function applyHistory(history) {
     }
     return session;
   });
-  currentSessionID = history.current_session_id || currentSessionID || persistedSessions[persistedSessions.length - 1]?.session_id || "";
+  currentSessionID = currentSessionID || history.current_session_id || persistedSessions[persistedSessions.length - 1]?.session_id || "";
   renderHistoryPanel();
   renderTodosPanel();
 }
@@ -1070,7 +686,7 @@ async function restoreHistory() {
 
 async function restoreSession(sessionID) {
   const session = await ensureSessionDetail(sessionID);
-  if (!session || controller) {
+  if (!session) {
     return;
   }
 
@@ -1097,20 +713,11 @@ async function restoreSession(sessionID) {
 }
 
 async function selectSession(sessionID) {
-  if (!sessionID || controller) {
+  if (!sessionID) {
     return;
   }
 
   try {
-    const response = await fetch("/api/session/select", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sessionID }),
-    });
-    if (!response.ok) {
-      throw new Error(`Session select failed: ${response.status}`);
-    }
-    applyHistory(await response.json());
     await restoreSession(sessionID);
   } catch {
     addEvent("Session unavailable");
@@ -1190,7 +797,7 @@ function renderHistoryPanel() {
   historyCount.textContent = String(sessionCount);
   historyButton.title = sessionCount === 0 ? "No saved sessions" : `Open ${sessionCount} saved ${sessionCount === 1 ? "session" : "sessions"}`;
   historyList.replaceChildren();
-  restoreButton.disabled = controller !== null || !currentSession() || sessionRunCount(currentSession()) === 0;
+  restoreButton.disabled = !currentSession() || sessionRunCount(currentSession()) === 0;
 
   if (sessionCount === 0) {
     historyState.textContent = "No saved sessions";
@@ -1460,25 +1067,6 @@ function closeMemoryDialog() {
   memoryDialog.removeAttribute("open");
 }
 
-function setRunning(isRunning) {
-  sendButton.disabled = isRunning;
-  resetButton.disabled = isRunning;
-  restoreButton.disabled = isRunning || !currentSession() || sessionRunCount(currentSession()) === 0;
-  if (isRunning) {
-    setState("Running", "Active", "Active", "Writing");
-    consoleStatus.textContent = "Running";
-    addEvent("Thinking");
-    return;
-  }
-
-  sessionState.textContent = "Idle";
-  contextState.textContent = "Ready";
-  refreshMemoryStatus();
-  if (!currentRun || currentRun.status === "running") {
-    consoleStatus.textContent = "Ready";
-  }
-}
-
 function setState(session, context, memory, label) {
   sessionState.textContent = session;
   contextState.textContent = context;
@@ -1545,206 +1133,6 @@ function addAssistantMessage({ content, trace, pending = false }) {
   conversation.append(wrapper);
   scrollConversation();
   return wrapper;
-}
-
-function addStreamingAssistantMessage() {
-  const wrapper = createMessage("assistant streaming", "Ternura");
-  let traceDetails = null;
-  let traceList = null;
-  const traceItems = new Map();
-  let finalContent = "";
-
-  const finalSection = document.createElement("section");
-  finalSection.className = "final-answer";
-
-  const finalLabel = document.createElement("span");
-  finalLabel.className = "message-label secondary";
-  finalLabel.textContent = "Final";
-
-  const finalBody = renderMarkdown("");
-  finalSection.append(finalLabel, finalBody);
-  wrapper.append(finalSection);
-  conversation.append(wrapper);
-
-  function ensureTrace() {
-    if (traceDetails) {
-      return;
-    }
-    traceDetails = document.createElement("details");
-    traceDetails.className = "trace-details";
-
-    const summary = document.createElement("summary");
-    summary.textContent = "Reasoning & tool use";
-    traceDetails.append(summary);
-
-    traceList = document.createElement("div");
-    traceList.className = "trace-list";
-    traceDetails.append(traceList);
-    wrapper.insertBefore(traceDetails, finalSection);
-  }
-
-  function startTrace(id, type, title) {
-    ensureTrace();
-    const section = document.createElement("section");
-    section.className = `trace-item trace-${type || "entry"}`;
-
-    const heading = document.createElement("h3");
-    heading.textContent = title || "Trace";
-
-    const body = renderMarkdown("");
-    section.append(heading, body);
-    traceList.append(section);
-    traceItems.set(id, { content: "", body, title: title || "Trace", type: type || "entry" });
-    scrollConversation();
-  }
-
-  function appendTrace(id, delta) {
-    if (!traceItems.has(id)) {
-      startTrace(id, "entry", "Trace");
-    }
-    const item = traceItems.get(id);
-    item.content += delta;
-    item.body.innerHTML = markdownToHTML(item.content);
-    scrollConversation();
-  }
-
-  function setTraceContent(id, content) {
-    if (!traceItems.has(id)) {
-      startTrace(id, "entry", "Trace");
-    }
-    const item = traceItems.get(id);
-    item.content = content;
-    item.body.innerHTML = markdownToHTML(item.content);
-    scrollConversation();
-  }
-
-  return {
-    remove() {
-      wrapper.remove();
-    },
-    startTrace,
-    appendTrace,
-    setTrace(id, content) {
-      setTraceContent(id, content);
-    },
-    setTraceSnapshot(trace) {
-      if (traceDetails) {
-        traceDetails.remove();
-      }
-      traceDetails = null;
-      traceList = null;
-      traceItems.clear();
-      if (!trace || trace.length === 0) {
-        return;
-      }
-      trace.forEach((item, index) => {
-        const id = `final-trace-${index + 1}`;
-        startTrace(id, item.type || "entry", item.title || "Trace");
-        setTraceContent(id, item.content || "");
-      });
-    },
-    appendContent(delta) {
-      finalContent += delta;
-      finalBody.innerHTML = markdownToHTML(finalContent);
-      scrollConversation();
-    },
-    setContent(content) {
-      finalContent = content || "";
-      finalBody.innerHTML = markdownToHTML(finalContent);
-      scrollConversation();
-    },
-    isTodoTrace(id) {
-      const item = traceItems.get(id);
-      return item?.title === "Tool use: update_todos";
-    },
-  };
-}
-
-function applyStreamEvent(message, event) {
-  switch (event.type) {
-    case "run_start":
-      startRun(event);
-      return;
-    case "run_done":
-    case "run_failed":
-    case "run_cancelled":
-      finishRun(event);
-      return;
-    case "start":
-      return;
-    case "trace_start":
-      message.startTrace(event.id, event.trace_type, event.title);
-      return;
-    case "trace_delta":
-      message.appendTrace(event.id, event.delta || "");
-      return;
-    case "trace_done":
-      if (event.content) {
-        message.setTrace(event.id, event.content);
-      }
-      if (message.isTodoTrace(event.id)) {
-        addEvent("Plan updated");
-        refreshHistoryPanel();
-      }
-      return;
-    case "content_delta":
-      message.appendContent(event.delta || "");
-      return;
-    case "done":
-      if (Array.isArray(event.trace)) {
-        message.setTraceSnapshot(event.trace);
-      }
-      message.setContent(event.content || "");
-      return;
-    case "error":
-      throw new Error(event.error || "stream error");
-    default:
-      return;
-  }
-}
-
-async function readEventStream(response, onEvent) {
-  if (!response.body) {
-    throw new Error("Streaming response body is unavailable.");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() || "";
-
-    for (const part of parts) {
-      const data = part
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trimStart())
-        .join("\n");
-      if (!data) {
-        continue;
-      }
-      onEvent(JSON.parse(data));
-    }
-  }
-
-  if (buffer.trim()) {
-    const data = buffer
-      .split("\n")
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trimStart())
-      .join("\n");
-    if (data) {
-      onEvent(JSON.parse(data));
-    }
-  }
 }
 
 function createMessage(kind, label) {
@@ -1967,22 +1355,4 @@ function escapeHTML(value) {
 
 function escapeAttribute(value) {
   return escapeHTML(value).replace(/`/g, "&#96;");
-}
-
-function localFallback(message, detail) {
-  return {
-    trace: [
-      {
-        type: "think",
-        title: "Thinking",
-        content: [
-          "The browser is showing the interactive console shell, but the Go web server is not reachable from this page.",
-          "",
-          `User message: ${message}`,
-          detail ? `Transport detail: ${detail}` : "",
-        ].filter(Boolean).join("\n"),
-      },
-    ],
-    content: "Ternura console is ready. Run `go run ./main -serve` from the project root to connect this UI to the local agent.",
-  };
 }

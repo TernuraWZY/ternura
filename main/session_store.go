@@ -351,6 +351,42 @@ func (s *sessionStore) NewSession() (sessionSnapshot, error) {
 	return cloneSnapshot(s.snapshot), nil
 }
 
+func (s *sessionStore) EnsureSession(sessionID string, title string) (sessionSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return sessionSnapshot{}, fmt.Errorf("session id is required")
+	}
+	if session := s.findSessionLocked(sessionID); session != nil {
+		if isUntitledSession(session.Title) && strings.TrimSpace(title) != "" {
+			session.Title = sessionTitle(title)
+			session.UpdatedAt = time.Now().Format(time.RFC3339Nano)
+			if err := s.saveLocked(); err != nil {
+				return sessionSnapshot{}, err
+			}
+		}
+		return cloneSnapshot(s.snapshot), nil
+	}
+
+	now := time.Now()
+	timestamp := now.Format(time.RFC3339Nano)
+	session := persistedSession{
+		SessionID: sessionID,
+		Title:     sessionTitle(firstNonEmpty(title, "External session")),
+		CreatedAt: timestamp,
+		UpdatedAt: timestamp,
+		Runs:      make([]persistedRun, 0),
+		Todos:     make([]persistedTodo, 0),
+	}
+	s.snapshot.Sessions = append(s.snapshot.Sessions, session)
+	if err := s.saveLocked(); err != nil {
+		return sessionSnapshot{}, err
+	}
+	return cloneSnapshot(s.snapshot), nil
+}
+
 func (s *sessionStore) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

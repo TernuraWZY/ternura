@@ -71,18 +71,13 @@
             <li class="event active">Ready</li>
           </ol>
         </section>
-
-        <button id="resetButton" class="reset-button" type="button">
-          <span aria-hidden="true">↻</span>
-          <span>New session</span>
-        </button>
       </aside>
 
       <section class="console">
         <header class="console-header">
           <div>
-            <h2>Agent Console</h2>
-            <p id="consoleStatus">Ready</p>
+            <h2>Agent Observatory</h2>
+            <p id="consoleStatus">Read-only</p>
           </div>
           <div class="header-actions">
             <button id="historyButton" class="history-button" type="button" title="Open history" aria-label="Open history">
@@ -98,21 +93,10 @@
             <button id="themeButton" class="theme-button" type="button" title="Switch theme" aria-label="Switch theme" aria-pressed="false">
               <span class="theme-icon" aria-hidden="true"></span>
             </button>
-            <button id="stopButton" class="stop-button" type="button" title="Stop response" aria-label="Stop response">
-              <span aria-hidden="true"></span>
-            </button>
           </div>
         </header>
 
         <section id="conversation" class="conversation" aria-live="polite"></section>
-
-        <form id="composer" class="composer">
-          <textarea id="promptInput" name="prompt" placeholder="Ask Ternura..." rows="3"></textarea>
-          <button id="sendButton" class="send-button" type="button">
-            <span aria-hidden="true">↗</span>
-            <span>Send</span>
-          </button>
-        </form>
       </section>
     </main>
 
@@ -171,26 +155,11 @@
           <button id="scheduleCloseButton" class="history-close-button" type="button" title="Close schedules" aria-label="Close schedules">×</button>
         </header>
         <section class="schedule-dialog-body">
-          <form id="scheduleForm" class="schedule-form">
-            <label>
-              <span>Title</span>
-              <input id="scheduleTitleInput" name="title" type="text" placeholder="Check build">
-            </label>
-            <label>
-              <span>Run at</span>
-              <input id="scheduleRunAtInput" name="run_at" type="datetime-local" required>
-            </label>
-            <label class="schedule-prompt-field">
-              <span>Prompt</span>
-              <textarea id="schedulePromptInput" name="prompt" rows="4" placeholder="What should Ternura do later?" required></textarea>
-            </label>
-            <button id="scheduleCreateButton" class="restore-button" type="submit">Create</button>
-          </form>
           <ol id="scheduleList" class="schedule-list"></ol>
         </section>
       </section>
     </dialog>
 
-    <script src="./app.js?v=20260521-schedule-sync"></script>
+    <script src="./app.js?v=20260522-readonly"></script>
   </body>
 </html>

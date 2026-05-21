@@ -14,11 +14,11 @@ const (
 	RunStatusSkipped = "skipped"
 
 	// Legacy API statuses (web UI).
-	LegacyScheduled  = "scheduled"
-	LegacyRunning    = "running"
-	LegacyCompleted  = "completed"
-	LegacyCancelled  = "cancelled"
-	LegacyFailed     = "failed"
+	LegacyScheduled = "scheduled"
+	LegacyRunning   = "running"
+	LegacyCompleted = "completed"
+	LegacyCancelled = "cancelled"
+	LegacyFailed    = "failed"
 )
 
 // Schedule 定义任务何时触发，对应 nanobot CronSchedule。
@@ -32,9 +32,20 @@ type Schedule struct {
 
 // Payload 定义到点后执行什么，对应 nanobot CronPayload（精简版：仅 agent_turn + session）。
 type Payload struct {
-	Message   string `json:"message"`
-	SessionID string `json:"session_id"`
-	Deliver   bool   `json:"deliver,omitempty"`
+	Message   string          `json:"message"`
+	SessionID string          `json:"session_id"`
+	Deliver   bool            `json:"deliver,omitempty"`
+	Delivery  *DeliveryTarget `json:"delivery,omitempty"`
+}
+
+// DeliveryTarget 记录外部 channel 的回传地址。Web Console 不需要它；
+// Feishu 这类外部入口会用它把 cron 触发后的 Agent 回复发回原聊天。
+type DeliveryTarget struct {
+	Channel       string `json:"channel,omitempty"`
+	ReceiveIDType string `json:"receive_id_type,omitempty"`
+	ReceiveID     string `json:"receive_id,omitempty"`
+	MessageID     string `json:"message_id,omitempty"`
+	ThreadID      string `json:"thread_id,omitempty"`
 }
 
 // RunRecord 单次执行记录。
@@ -80,6 +91,7 @@ type AddParams struct {
 	Message        string
 	SessionID      string
 	Deliver        bool
+	Delivery       *DeliveryTarget
 	DeleteAfterRun bool
 	EverySeconds   int
 	CronExpr       string

@@ -7,21 +7,28 @@ import (
 	"time"
 
 	"ternura"
+	"ternura/main/cron"
 	"ternura/tool"
 )
 
 // tryScheduleShortcut 对「N分钟后提醒我X」这类明确句式直接创建 cron，不依赖 LLM。
 func (s *agentServer) tryScheduleShortcut(ctx context.Context, message string) (ternura.AgentRunResult, bool, error) {
+	return s.tryScheduleShortcutForSession(ctx, message, s.store.CurrentSessionID(), nil)
+}
+
+func (s *agentServer) tryScheduleShortcutForSession(ctx context.Context, message string, sessionID string, delivery *cron.DeliveryTarget) (ternura.AgentRunResult, bool, error) {
 	params, ok := parseRelativeScheduleShortcut(message)
 	if !ok {
 		return ternura.AgentRunResult{}, false, nil
 	}
-	params.SessionID = s.store.CurrentSessionID()
+	params.SessionID = sessionID
+	params.Delivery = delivery
 	job, err := s.cron.Add(ctx, params)
 	if err != nil {
 		content := fmt.Sprintf("我识别到你想设置定时任务，但参数有问题（%s）。能再具体说一下时间吗？", err.Error())
 		return ternura.AgentRunResult{Content: content, RawContent: content}, true, nil
 	}
+	s.wakeCronRunner()
 	delayLabel := cronDelayLabel(job.State.NextRunAtMS)
 	content := fmt.Sprintf("好的，已设置%s的「%s」。\n\n任务 ID：`%s`\n到时间后我会在当前会话里提醒你。", delayLabel, job.Name, job.ID)
 	args, _ := json.MarshalIndent(map[string]any{

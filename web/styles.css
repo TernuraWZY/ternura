@@ -633,58 +633,6 @@ textarea {
   overflow: auto;
 }
 
-.schedule-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 220px auto;
-  gap: 12px;
-  align-items: end;
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: var(--message-shadow);
-}
-
-.schedule-form label {
-  display: grid;
-  min-width: 0;
-  gap: 7px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-
-.schedule-prompt-field {
-  grid-column: 1 / -1;
-}
-
-.schedule-form input,
-.schedule-form textarea {
-  width: 100%;
-  min-width: 0;
-  padding: 11px 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--text);
-  background: var(--panel);
-  font-size: 13px;
-  font-weight: 400;
-  line-height: 1.45;
-  outline: none;
-}
-
-.schedule-form textarea {
-  min-height: 92px;
-  resize: vertical;
-}
-
-.schedule-form input:focus,
-.schedule-form textarea:focus {
-  border-color: var(--final-line);
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
 .schedule-list {
   display: grid;
   gap: 12px;
@@ -774,31 +722,6 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.4;
-}
-
-.schedule-cancel-button {
-  min-height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--trace-line);
-  border-radius: 8px;
-  color: var(--pink);
-  background: var(--pink-soft);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
-}
-
-.schedule-cancel-button:hover,
-.schedule-cancel-button:focus-visible {
-  border-color: var(--pink);
-  background: var(--panel);
-  outline: none;
-}
-
-.schedule-cancel-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
 }
 
 .memory-section {
@@ -916,31 +839,6 @@ textarea {
   color: var(--muted);
 }
 
-.memory-delete-button {
-  min-height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--trace-line);
-  border-radius: 8px;
-  color: var(--pink);
-  background: var(--pink-soft);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
-}
-
-.memory-delete-button:hover,
-.memory-delete-button:focus-visible {
-  border-color: var(--pink);
-  background: var(--panel);
-  outline: none;
-}
-
-.memory-delete-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
 .events-list {
   display: grid;
   max-height: min(24vh, 260px);
@@ -966,34 +864,8 @@ textarea {
   background: var(--teal-soft);
 }
 
-.reset-button {
-  display: flex;
-  min-height: 58px;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  margin-top: auto;
-  border: 0;
-  border-radius: 8px;
-  color: var(--teal-dark);
-  background: var(--reset-bg);
-  font-size: 22px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 160ms ease, transform 160ms ease;
-}
-
-.reset-button:hover {
-  background: var(--reset-hover);
-}
-
-.reset-button:active,
-.send-button:active,
 .memory-status-button:active,
-.memory-delete-button:active,
-.schedule-cancel-button:active,
 .theme-button:active,
-.stop-button:active,
 .history-button:active,
 .history-close-button:active,
 .restore-button:active {
@@ -1006,7 +878,7 @@ textarea {
   height: 100vh;
   height: 100dvh;
   min-height: 0;
-  grid-template-rows: 117px minmax(0, 1fr) auto;
+  grid-template-rows: 117px minmax(0, 1fr);
   background: var(--bg);
   overflow: hidden;
 }
@@ -1144,11 +1016,8 @@ textarea {
 }
 
 .theme-button:focus-visible,
-.stop-button:focus-visible,
-.reset-button:focus-visible,
 .history-button:focus-visible,
-.restore-button:focus-visible,
-.send-button:focus-visible {
+.restore-button:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
@@ -1174,25 +1043,6 @@ textarea {
   border: 2px solid currentColor;
   border-radius: 50%;
   content: "";
-}
-
-.stop-button {
-  display: grid;
-  width: 56px;
-  height: 56px;
-  place-items: center;
-  border: 0;
-  border-radius: 8px;
-  background: var(--pink-soft);
-  cursor: pointer;
-  transition: background 160ms ease, transform 160ms ease;
-}
-
-.stop-button span {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  background: var(--pink);
 }
 
 .conversation {
@@ -1492,69 +1342,6 @@ textarea {
   text-underline-offset: 3px;
 }
 
-.composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 118px;
-  gap: 14px;
-  min-height: 132px;
-  padding: 18px 36px;
-  border-top: 1px solid var(--line);
-  background: var(--panel);
-  overflow: hidden;
-}
-
-.composer textarea {
-  display: block;
-  width: 100%;
-  min-height: 96px;
-  resize: none;
-  padding: 18px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--text);
-  background: var(--panel);
-  font-size: 18px;
-  line-height: 1.35;
-  outline: none;
-}
-
-.composer textarea::placeholder {
-  color: var(--placeholder);
-  font-weight: 400;
-}
-
-.composer textarea:focus {
-  border-color: var(--final-line);
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.send-button {
-  display: flex;
-  min-width: 0;
-  min-height: 96px;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  border: 0;
-  border-radius: 8px;
-  color: #fff;
-  background: var(--teal);
-  font-size: 18px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 160ms ease, transform 160ms ease;
-}
-
-.send-button:hover {
-  background: var(--teal-dark);
-}
-
-.send-button:disabled,
-.reset-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
-}
-
 @media (max-width: 980px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -1585,14 +1372,10 @@ textarea {
     max-height: 160px;
   }
 
-  .reset-button {
-    margin-top: 0;
-  }
-
   .console {
     height: auto;
     min-height: 0;
-    grid-template-rows: 92px minmax(0, 1fr) auto;
+    grid-template-rows: 92px minmax(0, 1fr);
   }
 
   .console-header {
@@ -1603,21 +1386,6 @@ textarea {
     padding: 18px;
   }
 
-  .composer {
-    grid-template-columns: 1fr;
-    min-height: 140px;
-    padding: 14px 18px;
-  }
-
-  .composer textarea,
-  .send-button {
-    min-height: 72px;
-    font-size: 16px;
-  }
-
-  .schedule-form {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (max-width: 560px) {
@@ -1636,8 +1404,7 @@ textarea {
   }
 
   .history-button,
-  .theme-button,
-  .stop-button {
+  .theme-button {
     width: 48px;
     height: 48px;
   }

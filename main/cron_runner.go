@@ -106,11 +106,6 @@ func (s *agentServer) runCronJob(ctx context.Context, job cron.Job) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.cronTool != nil {
-		s.cronTool.SetCronContext(true)
-		defer s.cronTool.SetCronContext(false)
-	}
-
 	run := newRunLifecycle()
 	display := strings.TrimSpace(job.Payload.Message)
 	log.Printf("cron job %s started run %s for session %s", job.ID, run.ID, job.Payload.SessionID)
@@ -126,7 +121,9 @@ func (s *agentServer) runCronJob(ctx context.Context, job cron.Job) {
 	}
 
 	runtimePrompt := wrapCronRuntimePrompt(display)
-	agent := s.newAgentForSession(job.Payload.SessionID)
+	cronTool := tool.NewCronTool(s.cronAddForSession(job.Payload.SessionID), s.cronList, s.cronRemove)
+	cronTool.SetCronContext(true)
+	agent := s.newAgentForSessionWithCron(job.Payload.SessionID, cronTool)
 	started := run.StartedAt
 	result, err := agent.RunWithTrace(ctx, runtimePrompt)
 	finished := time.Now()
@@ -142,6 +139,9 @@ func (s *agentServer) runCronJob(ctx context.Context, job cron.Job) {
 	if completeErr := s.cron.RecordRun(context.Background(), job.ID, run.ID, started, err); completeErr != nil {
 		log.Printf("complete cron job %s: %v", job.ID, completeErr)
 	}
+	if err == nil && job.Payload.Deliver && job.Payload.Delivery != nil {
+		s.deliverCronResult(ctx, job, result)
+	}
 
 	if job.Payload.SessionID == s.store.CurrentSessionID() {
 		s.resetAgentFromSnapshot(s.store.Snapshot())
@@ -153,6 +153,10 @@ func (s *agentServer) cronAdd(ctx context.Context, params tool.CronAddParams) (t
 }
 
 func (s *agentServer) cronAddForSession(sessionID string) tool.CronAddFunc {
+	return s.cronAddForSessionWithDelivery(sessionID, nil)
+}
+
+func (s *agentServer) cronAddForSessionWithDelivery(sessionID string, delivery *cron.DeliveryTarget) tool.CronAddFunc {
 	return func(ctx context.Context, params tool.CronAddParams) (tool.CronAddResult, error) {
 		targetSessionID := sessionID
 		if targetSessionID == "" {
@@ -163,6 +167,7 @@ func (s *agentServer) cronAddForSession(sessionID string) tool.CronAddFunc {
 			Message:        params.Message,
 			SessionID:      targetSessionID,
 			Deliver:        params.Deliver,
+			Delivery:       delivery,
 			EverySeconds:   params.EverySeconds,
 			CronExpr:       params.CronExpr,
 			TZ:             params.TZ,
@@ -236,6 +241,10 @@ func formatCronTiming(job cron.Job) string {
 }
 
 func (s *agentServer) newAgentForSession(sessionID string) *ternura.Agent {
+	return s.newAgentForSessionWithCron(sessionID, tool.NewCronTool(s.cronAddForSession(sessionID), s.cronList, s.cronRemove))
+}
+
+func (s *agentServer) newAgentForSessionWithCron(sessionID string, cronTool *tool.CronTool) *ternura.Agent {
 	agent := ternura.NewAgent(
 		s.modelConf,
 		ternura.TernuraAgentSystemPrompt,
@@ -243,7 +252,7 @@ func (s *agentServer) newAgentForSession(sessionID string) *ternura.Agent {
 			s.updateTodosForSession(sessionID),
 			s.rememberMemory,
 			s.forgetMemory,
-			s.cronTool,
+			cronTool,
 		),
 		ternura.WithHooks(
 			newCurrentTimeHook(),

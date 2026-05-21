@@ -17,6 +17,7 @@ import (
 
 	"ternura"
 	"ternura/main/cron"
+	"ternura/main/feishu"
 	"ternura/shared"
 	"ternura/tool"
 )
@@ -37,6 +38,9 @@ func main() {
 	if *serve {
 		server := newAgentServer(modelConf)
 		go newCronRunner(server).Run(ctx)
+		if server.feishu.WebSocketEnabled() {
+			go server.feishu.StartWebSocket(ctx)
+		}
 		log.Printf("serving Ternura console on http://localhost%s", *addr)
 		if err := http.ListenAndServe(*addr, server.routes()); err != nil {
 			log.Fatalf("server error: %v", err)
@@ -66,6 +70,7 @@ type agentServer struct {
 	cron      *cron.Service
 	cronTool  *tool.CronTool
 	cronWake  chan struct{}
+	feishu    *feishu.Service
 }
 
 type scheduleCreateRequest struct {
@@ -114,6 +119,8 @@ func newAgentServer(modelConf shared.ModelConfig) *agentServer {
 	s.memory = newMemoryStore(s.store.root)
 	s.cron = cron.NewService(s.store.root)
 	s.cronTool = tool.NewCronTool(s.cronAdd, s.cronList, s.cronRemove)
+	feishuConfig := feishu.NewConfigFromEnv()
+	s.feishu = feishu.NewService(feishuConfig, s.handleFeishuMessage)
 	if err := s.store.Load(); err != nil {
 		log.Printf("load persisted session: %v", err)
 	}
@@ -126,15 +133,12 @@ func newAgentServer(modelConf shared.ModelConfig) *agentServer {
 
 func (s *agentServer) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/chat", s.handleChat)
-	mux.HandleFunc("/api/chat/stream", s.handleChatStream)
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/api/memory", s.handleMemory)
 	mux.HandleFunc("/api/memory/status", s.handleMemoryStatus)
 	mux.HandleFunc("/api/schedules", s.handleSchedules)
+	mux.Handle("/api/feishu/events", s.feishu)
 	mux.HandleFunc("/api/session", s.handleSessionDetail)
-	mux.HandleFunc("/api/session/select", s.handleSelectSession)
-	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.Handle("/", noCache(http.FileServer(http.Dir("web"))))
 	return mux
 }

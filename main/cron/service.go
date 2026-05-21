@@ -15,12 +15,12 @@ import (
 
 // Service 管理 cron 任务的持久化与调度，设计参考 nanobot CronService。
 type Service struct {
-	mu       sync.Mutex
-	root     string
-	storePath string
+	mu         sync.Mutex
+	root       string
+	storePath  string
 	legacyPath string
-	file     storeFile
-	running  bool
+	file       storeFile
+	running    bool
 }
 
 func NewService(root string) *Service {
@@ -102,14 +102,15 @@ func (s *Service) Add(ctx context.Context, params AddParams) (Job, error) {
 
 	nowMS := now.UnixMilli()
 	job := Job{
-		ID:      newJobID(now),
-		Name:    name,
-		Enabled: true,
+		ID:       newJobID(now),
+		Name:     name,
+		Enabled:  true,
 		Schedule: schedule,
 		Payload: Payload{
 			Message:   message,
 			SessionID: sessionID,
 			Deliver:   params.Deliver,
+			Delivery:  cloneDeliveryTarget(params.Delivery),
 		},
 		State: JobState{
 			NextRunAtMS: ComputeNextRun(schedule, nowMS),
@@ -387,6 +388,22 @@ func normalizeStore(file storeFile) storeFile {
 		}
 	}
 	return file
+}
+
+func cloneDeliveryTarget(target *DeliveryTarget) *DeliveryTarget {
+	if target == nil {
+		return nil
+	}
+	cloned := *target
+	cloned.Channel = strings.TrimSpace(cloned.Channel)
+	cloned.ReceiveIDType = strings.TrimSpace(cloned.ReceiveIDType)
+	cloned.ReceiveID = strings.TrimSpace(cloned.ReceiveID)
+	cloned.MessageID = strings.TrimSpace(cloned.MessageID)
+	cloned.ThreadID = strings.TrimSpace(cloned.ThreadID)
+	if cloned.Channel == "" || cloned.ReceiveID == "" {
+		return nil
+	}
+	return &cloned
 }
 
 func removeJobLocked(jobs []Job, id string) []Job {
