@@ -13,7 +13,7 @@ func TestUpdateTodosToolNormalizesAndCallsUpdater(t *testing.T) {
 		return nil
 	})
 
-	result, err := todosTool.Execute(context.Background(), `{"todos":[{"content":"Inspect current prompt","status":"running"},{"id":"ship","content":"Update README","status":"completed"}]}`)
+	result, err := todosTool.InvokableRun(context.Background(), `{"todos":[{"content":"Inspect current prompt","status":"running"},{"id":"ship","content":"Update README","status":"completed"}]}`)
 	if err != nil {
 		t.Fatalf("execute update_todos: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestUpdateTodosToolNormalizesAndCallsUpdater(t *testing.T) {
 func TestUpdateTodosToolRejectsInvalidStatus(t *testing.T) {
 	todosTool := NewUpdateTodosTool(nil)
 
-	_, err := todosTool.Execute(context.Background(), `{"todos":[{"content":"Unknown state","status":"later"}]}`)
+	_, err := todosTool.InvokableRun(context.Background(), `{"todos":[{"content":"Unknown state","status":"later"}]}`)
 	if err == nil {
 		t.Fatalf("expected invalid status error")
 	}

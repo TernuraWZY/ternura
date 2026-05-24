@@ -112,7 +112,7 @@ func (t *CronTool) Info(context.Context) (*schema.ToolInfo, error) {
 	)
 }
 
-func (t *CronTool) Execute(ctx context.Context, argumentsInJSON string) (string, error) {
+func (t *CronTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
 	var params struct {
 		Action       string `json:"action"`
 		Name         string `json:"name"`

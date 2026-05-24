@@ -40,7 +40,7 @@ func (t *WriteTool) Info(context.Context) (*schema.ToolInfo, error) {
 	})
 }
 
-func (t *WriteTool) Execute(ctx context.Context, argumentsInJSON string) (string, error) {
+func (t *WriteTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
 	p := WriteToolParam{}
 	err := json.Unmarshal([]byte(argumentsInJSON), &p)
 	if err != nil {

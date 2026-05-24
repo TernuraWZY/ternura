@@ -89,7 +89,7 @@ func (t *RememberTool) Info(context.Context) (*schema.ToolInfo, error) {
 	)
 }
 
-func (t *RememberTool) Execute(ctx context.Context, argumentsInJSON string) (string, error) {
+func (t *RememberTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
 	p := MemoryItem{}
 	if err := json.Unmarshal([]byte(argumentsInJSON), &p); err != nil {
 		return "", err
@@ -137,7 +137,7 @@ func (t *ForgetMemoryTool) Info(context.Context) (*schema.ToolInfo, error) {
 	)
 }
 
-func (t *ForgetMemoryTool) Execute(ctx context.Context, argumentsInJSON string) (string, error) {
+func (t *ForgetMemoryTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
 	p := struct {
 		ID string `json:"id"`
 	}{}

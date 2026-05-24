@@ -37,7 +37,7 @@ func (t *ReadTool) Info(context.Context) (*schema.ToolInfo, error) {
 	})
 }
 
-func (t *ReadTool) Execute(ctx context.Context, argumentsInJSON string) (string, error) {
+func (t *ReadTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
 	p := ReadToolParam{}
 	err := json.Unmarshal([]byte(argumentsInJSON), &p)
 	if err != nil {

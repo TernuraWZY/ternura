@@ -82,7 +82,7 @@ func (t *UpdateTodosTool) Info(context.Context) (*schema.ToolInfo, error) {
 	)
 }
 
-func (t *UpdateTodosTool) Execute(ctx context.Context, argumentsInJSON string) (string, error) {
+func (t *UpdateTodosTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
 	p := updateTodosToolParam{}
 	if err := json.Unmarshal([]byte(argumentsInJSON), &p); err != nil {
 		return "", err

@@ -8,7 +8,7 @@ import (
 
 func TestCronToolAddRequiresMessage(t *testing.T) {
 	tool := NewCronTool(nil, nil, nil)
-	out, err := tool.Execute(context.Background(), `{"action":"add"}`)
+	out, err := tool.InvokableRun(context.Background(), `{"action":"add"}`)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -24,7 +24,7 @@ func TestCronToolAddExecutesCallback(t *testing.T) {
 		return CronAddResult{ID: "cron-test", Name: "test", NextRunAt: "2099-01-01T09:00:00Z"}, nil
 	}, nil, nil)
 
-	out, err := tool.Execute(context.Background(), `{"action":"add","message":"remind user","delay_seconds":120}`)
+	out, err := tool.InvokableRun(context.Background(), `{"action":"add","message":"remind user","delay_seconds":120}`)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestCronToolBlocksNestedAdd(t *testing.T) {
 		return CronAddResult{}, nil
 	}, nil, nil)
 	tool.SetCronContext(true)
-	out, err := tool.Execute(context.Background(), `{"action":"add","message":"nested","delay_seconds":60}`)
+	out, err := tool.InvokableRun(context.Background(), `{"action":"add","message":"nested","delay_seconds":60}`)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}

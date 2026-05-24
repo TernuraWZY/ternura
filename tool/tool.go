@@ -1,9 +1,9 @@
 package tool
 
 import (
-	"context"
 	"encoding/json"
 
+	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	einojsonschema "github.com/eino-contrib/jsonschema"
 )
@@ -22,10 +22,11 @@ const (
 )
 
 type Tool interface {
+	einotool.InvokableTool
 	ToolName() AgentTool
-	Info(ctx context.Context) (*schema.ToolInfo, error)
-	Execute(ctx context.Context, argumentsInJSON string) (string, error)
 }
+
+type Option = einotool.Option
 
 func NewToolInfo(name AgentTool, desc string, params map[string]any) (*schema.ToolInfo, error) {
 	info := &schema.ToolInfo{

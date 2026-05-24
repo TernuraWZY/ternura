@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"strings"
 	"unicode/utf8"
@@ -130,7 +129,7 @@ func (a *Agent) execute(ctx context.Context, toolName string, argumentsInJSON st
 	if !ok {
 		return "", errors.New("tool not found")
 	}
-	return t.Execute(ctx, argumentsInJSON)
+	return t.InvokableRun(ctx, argumentsInJSON)
 }
 
 func (a *Agent) ensureChatModel() error {
@@ -141,6 +140,12 @@ func (a *Agent) ensureChatModel() error {
 }
 
 func (a *Agent) executeTool(ctx context.Context, runCtx *RunContext, call schema.ToolCall) ToolResult {
+	return a.executeToolWithRunner(ctx, runCtx, call, func(ctx context.Context) (string, error) {
+		return a.execute(ctx, call.Function.Name, call.Function.Arguments)
+	})
+}
+
+func (a *Agent) executeToolWithRunner(ctx context.Context, runCtx *RunContext, call schema.ToolCall, runner func(context.Context) (string, error)) ToolResult {
 	if runCtx != nil {
 		runCtx.ToolCallCount++
 	}
@@ -157,7 +162,7 @@ func (a *Agent) executeTool(ctx context.Context, runCtx *RunContext, call schema
 		return result
 	}
 
-	content, err := a.execute(ctx, call.Function.Name, call.Function.Arguments)
+	content, err := runner(ctx)
 	if err != nil {
 		content = err.Error()
 	}
@@ -207,58 +212,26 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 		Trace: make([]AgentTraceItem, 0),
 	}
 	for {
-		runCtx.ModelCallCount++
-		if err := a.hooks.BeforeModelCall(ctx, runCtx); err != nil {
-			return result, err
-		}
-		if err := a.ensureChatModel(); err != nil {
-			return result, err
-		}
-		forcedToolChoice := runCtx.RequestedToolChoice()
-		modelCall, err := a.newModelCall(ctx, runCtx)
+		runtime, err := a.newEinoAgentRun(ctx, runCtx, &result, nil)
 		if err != nil {
 			return result, err
 		}
-
-		log.Printf("calling llm model %s...", a.model)
-		message, err := a.chatModel.Generate(ctx, modelCall.Messages, modelCall.Options...)
+		message, err := runtime.Generate(ctx)
 		if err != nil {
-			log.Printf("failed to send a new completion request: %v", err)
 			return AgentRunResult{}, err
 		}
 		if message == nil {
-			log.Printf("no message returned")
 			return result, nil
 		}
-		a.messages = append(a.messages, message)
-		appendThinkTrace(&result, message.Content)
-		if err := a.hooks.AfterModelResponse(ctx, runCtx, message); err != nil {
+		if runtime.RetryIgnoredToolChoice(ctx) {
+			continue
+		}
+		result.RawContent = message.Content
+		result.Content = stripThinkBlocks(message.Content)
+		if err := a.hooks.FinalizeRun(ctx, runCtx, &result); err != nil {
 			return result, err
 		}
-
-		// tool loop 结束，可以返回结果
-		if len(message.ToolCalls) == 0 {
-			if a.retryIgnoredToolChoice(ctx, runCtx, forcedToolChoice) {
-				continue
-			}
-			result.RawContent = message.Content
-			result.Content = stripThinkBlocks(message.Content)
-			if err := a.hooks.FinalizeRun(ctx, runCtx, &result); err != nil {
-				return result, err
-			}
-			break
-		}
-
-		runCtx.ClearToolChoice()
-
-		for _, toolCall := range message.ToolCalls {
-			toolResult := a.executeTool(ctx, runCtx, toolCall)
-			traceItem := toolTraceFromResult(toolResult)
-			result.Trace = append(result.Trace, traceItem)
-			log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Function.Name, toolResult.Call.Function.Arguments, toolResult.Err)
-			a.messages = append(a.messages, schema.ToolMessage(toolResult.Content, toolResult.Call.ID, schema.WithToolName(toolResult.Call.Function.Name)))
-		}
-
+		break
 	}
 	return result, nil
 }
@@ -282,125 +255,35 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 	result = AgentRunResult{
 		Trace: make([]AgentTraceItem, 0),
 	}
-	traceIndex := 0
-	newTraceID := func() string {
-		traceIndex++
-		return fmt.Sprintf("trace-%d", traceIndex)
-	}
 
 	for {
-		runCtx.ModelCallCount++
-		if err := a.hooks.BeforeModelCall(ctx, runCtx); err != nil {
-			return result, err
-		}
-		if err := a.ensureChatModel(); err != nil {
-			return result, err
-		}
-		forcedToolChoice := runCtx.RequestedToolChoice()
-		modelCall, err := a.newModelCall(ctx, runCtx)
+		runtime, err := a.newEinoAgentRun(ctx, runCtx, &result, emit)
 		if err != nil {
 			return result, err
 		}
-		toolMessages := make([]*schema.Message, 0)
-
-		log.Printf("streaming llm model %s...", a.model)
-		stream, err := a.chatModel.Stream(ctx, modelCall.Messages, modelCall.Options...)
+		message, err := runtime.Stream(ctx)
 		if err != nil {
-			log.Printf("failed to stream completion request: %v", err)
 			return result, err
 		}
-		contentRouter := newStreamingContentRouter(
-			func() string { return newTraceID() },
-			func(event AgentStreamEvent) error {
-				if event.Type == "trace_start" {
-					result.Trace = append(result.Trace, AgentTraceItem{
-						Type:  event.TraceType,
-						Title: event.Title,
-					})
-				}
-				if event.Type == "trace_delta" && len(result.Trace) > 0 {
-					result.Trace[len(result.Trace)-1].Content += event.Delta
-				}
-				if event.Type == "content_delta" {
-					result.Content += event.Delta
-				}
-				return emit(event)
-			},
-		)
-
-		chunks := make([]*schema.Message, 0)
-		for {
-			chunk, err := stream.Recv()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				stream.Close()
-				log.Printf("failed to stream completion request: %v", err)
-				return result, err
-			}
-			if chunk == nil {
-				continue
-			}
-			chunks = append(chunks, chunk)
-			if chunk.Content != "" {
-				result.RawContent += chunk.Content
-				if err := contentRouter.Write(chunk.Content); err != nil {
-					stream.Close()
-					return result, err
-				}
-			}
-		}
-		stream.Close()
-		if err := contentRouter.Flush(); err != nil {
-			return result, err
-		}
-
-		if len(chunks) == 0 {
+		if message == nil {
 			return result, nil
 		}
-
-		message, err := schema.ConcatMessages(chunks)
-		if err != nil {
+		if runtime.RetryIgnoredToolChoice(ctx) {
+			continue
+		}
+		result.Content = strings.TrimSpace(result.Content)
+		if err := a.hooks.FinalizeRun(ctx, runCtx, &result); err != nil {
 			return result, err
 		}
-		a.messages = append(a.messages, message)
-		if err := a.hooks.AfterModelResponse(ctx, runCtx, message); err != nil {
+		if err := emit(AgentStreamEvent{
+			Type:       "done",
+			Content:    result.Content,
+			Trace:      result.Trace,
+			RawContent: result.RawContent,
+		}); err != nil {
 			return result, err
 		}
-
-		if len(message.ToolCalls) == 0 {
-			if a.retryIgnoredToolChoice(ctx, runCtx, forcedToolChoice) {
-				continue
-			}
-			result.Content = strings.TrimSpace(result.Content)
-			if err := a.hooks.FinalizeRun(ctx, runCtx, &result); err != nil {
-				return result, err
-			}
-			if err := emit(AgentStreamEvent{
-				Type:       "done",
-				Content:    result.Content,
-				Trace:      result.Trace,
-				RawContent: result.RawContent,
-			}); err != nil {
-				return result, err
-			}
-			return result, nil
-		}
-
-		runCtx.ClearToolChoice()
-
-		for _, toolCall := range message.ToolCalls {
-			toolResult := a.executeTool(ctx, runCtx, toolCall)
-			toolTrace := toolTraceFromResult(toolResult)
-			result.Trace = append(result.Trace, toolTrace)
-			if err := emitTraceItem(emit, newTraceID(), toolTrace); err != nil {
-				return result, err
-			}
-			log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Function.Name, toolResult.Call.Function.Arguments, toolResult.Err)
-			toolMessages = append(toolMessages, schema.ToolMessage(toolResult.Content, toolResult.Call.ID, schema.WithToolName(toolResult.Call.Function.Name)))
-		}
-		a.messages = append(a.messages, toolMessages...)
+		return result, nil
 	}
 }
 
@@ -411,8 +294,12 @@ type modelCallRequest struct {
 }
 
 func (a *Agent) newModelCall(ctx context.Context, runCtx *RunContext) (modelCallRequest, error) {
+	return a.newModelCallWithMessages(ctx, runCtx, a.messages)
+}
+
+func (a *Agent) newModelCallWithMessages(ctx context.Context, runCtx *RunContext, messages []*schema.Message) (modelCallRequest, error) {
 	req := modelCallRequest{
-		Messages: a.messagesWithRuntimeContext(runCtx),
+		Messages: a.messagesWithRuntimeContextForMessages(messages, runCtx),
 		Tools:    make([]*schema.ToolInfo, 0),
 		Options:  make([]einomodel.Option, 0),
 	}
@@ -467,22 +354,30 @@ func resolveToolChoice(runCtx *RunContext, tools []*schema.ToolInfo, available m
 }
 
 func (a *Agent) messagesWithRuntimeContext(runCtx *RunContext) []*schema.Message {
+	return a.messagesWithRuntimeContextForMessages(a.messages, runCtx)
+}
+
+func (a *Agent) messagesWithRuntimeContextForMessages(input []*schema.Message, runCtx *RunContext) []*schema.Message {
 	runtimeContext := ""
 	if runCtx != nil {
 		runtimeContext = runCtx.RuntimeContextText()
 	}
 
 	if runtimeContext == "" {
-		return a.messages
+		return input
 	}
 
-	messages := make([]*schema.Message, 0, len(a.messages)+1)
+	messages := make([]*schema.Message, 0, len(input)+1)
 	systemContent := strings.TrimSpace(a.systemPrompt + "\n\n" + runtimeContext)
 	messages = append(messages, schema.SystemMessage(systemContent))
-	if len(a.messages) == 0 {
+	if len(input) == 0 {
 		return messages
 	}
-	messages = append(messages, a.messages[1:]...)
+	if input[0].Role == schema.System {
+		messages = append(messages, input[1:]...)
+	} else {
+		messages = append(messages, input...)
+	}
 	return messages
 }
 

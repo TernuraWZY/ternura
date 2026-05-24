@@ -17,7 +17,7 @@ func TestRememberToolStoresNormalizedMemory(t *testing.T) {
 		}, nil
 	})
 
-	result, err := tool.Execute(context.Background(), `{"category":"preference","content":"  prefers concise answers  ","source":" user said so "}`)
+	result, err := tool.InvokableRun(context.Background(), `{"category":"preference","content":"  prefers concise answers  ","source":" user said so "}`)
 	if err != nil {
 		t.Fatalf("execute remember: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestRememberToolStoresNormalizedMemory(t *testing.T) {
 
 func TestForgetMemoryToolRequiresID(t *testing.T) {
 	tool := NewForgetMemoryTool(nil)
-	if _, err := tool.Execute(context.Background(), `{}`); err == nil {
+	if _, err := tool.InvokableRun(context.Background(), `{}`); err == nil {
 		t.Fatalf("expected missing id error")
 	}
 }

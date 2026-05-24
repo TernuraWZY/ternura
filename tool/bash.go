@@ -36,7 +36,7 @@ func (t *BashTool) Info(context.Context) (*schema.ToolInfo, error) {
 	})
 }
 
-func (t *BashTool) Execute(ctx context.Context, argumentsInJSON string) (string, error) {
+func (t *BashTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
 	p := BashToolParam{}
 	err := json.Unmarshal([]byte(argumentsInJSON), &p)
 	if err != nil {
