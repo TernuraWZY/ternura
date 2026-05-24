@@ -39,7 +39,7 @@ func TestModelCallFiltersDisabledTools(t *testing.T) {
 	runCtx := NewRunContext("hello", RunModeSync)
 	runCtx.DisableTool(tool.AgentToolBash, "shell disabled")
 
-	req, err := agent.newModelCall(runCtx)
+	req, err := agent.newModelCall(context.Background(), runCtx)
 
 	if err != nil {
 		t.Fatalf("new model call: %v", err)
@@ -53,7 +53,7 @@ func TestModelCallDefaultsToolChoiceToAuto(t *testing.T) {
 	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
 	runCtx := NewRunContext("hello", RunModeSync)
 
-	req, err := agent.newModelCall(runCtx)
+	req, err := agent.newModelCall(context.Background(), runCtx)
 	if err != nil {
 		t.Fatalf("new model call: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestModelCallAppliesSpecificToolChoice(t *testing.T) {
 	runCtx := NewRunContext("run command", RunModeSync)
 	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceSpecific, Name: tool.AgentToolBash})
 
-	req, err := agent.newModelCall(runCtx)
+	req, err := agent.newModelCall(context.Background(), runCtx)
 	if err != nil {
 		t.Fatalf("new model call: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestModelCallAppliesRequiredToolChoice(t *testing.T) {
 	runCtx := NewRunContext("run command", RunModeSync)
 	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceRequired})
 
-	req, err := agent.newModelCall(runCtx)
+	req, err := agent.newModelCall(context.Background(), runCtx)
 	if err != nil {
 		t.Fatalf("new model call: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestModelCallDropsToolChoiceWhenTargetUnavailable(t *testing.T) {
 	runCtx := NewRunContext("run command", RunModeSync)
 	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceSpecific, Name: tool.AgentToolRead})
 
-	req, err := agent.newModelCall(runCtx)
+	req, err := agent.newModelCall(context.Background(), runCtx)
 	if err != nil {
 		t.Fatalf("new model call: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestModelCallDropsToolChoiceWhenTargetDisabled(t *testing.T) {
 	runCtx.DisableTool(tool.AgentToolBash, "shell disabled")
 	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceSpecific, Name: tool.AgentToolBash})
 
-	req, err := agent.newModelCall(runCtx)
+	req, err := agent.newModelCall(context.Background(), runCtx)
 	if err != nil {
 		t.Fatalf("new model call: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestRuntimeContextDoesNotAddSecondSystemMessage(t *testing.T) {
 	runCtx := NewRunContext("next", RunModeSync)
 	runCtx.SetContextBlock("memory", "Memory", "User prefers concise replies.")
 
-	req, err := agent.newModelCall(runCtx)
+	req, err := agent.newModelCall(context.Background(), runCtx)
 
 	if err != nil {
 		t.Fatalf("new model call: %v", err)
@@ -163,10 +163,12 @@ func TestBeforeToolCallHookCanBlockExecution(t *testing.T) {
 	}, WithHooks(blockingToolHook{}))
 	runCtx := NewRunContext("hello", RunModeSync)
 
-	result := agent.executeTool(context.Background(), runCtx, ToolCall{
-		ID:        "call-1",
-		Name:      string(tool.AgentToolBash),
-		Arguments: `{"command":"echo should-not-run"}`,
+	result := agent.executeTool(context.Background(), runCtx, schema.ToolCall{
+		ID: "call-1",
+		Function: schema.FunctionCall{
+			Name:      string(tool.AgentToolBash),
+			Arguments: `{"command":"echo should-not-run"}`,
+		},
 	})
 
 	if result.Err == nil {
@@ -207,7 +209,7 @@ func (blockingToolHook) HookName() string {
 	return "blocker"
 }
 
-func (blockingToolHook) BeforeToolCall(context.Context, *RunContext, *ToolCall) error {
+func (blockingToolHook) BeforeToolCall(context.Context, *RunContext, *schema.ToolCall) error {
 	return errors.New("blocked by policy")
 }
 

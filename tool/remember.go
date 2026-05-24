@@ -6,8 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/shared"
+	"github.com/cloudwego/eino/schema"
 )
 
 const (
@@ -63,13 +62,11 @@ func (t *RememberTool) ToolName() AgentTool {
 	return AgentToolRemember
 }
 
-func (t *RememberTool) Info() openai.ChatCompletionToolUnionParam {
-	return openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-		Name: string(AgentToolRemember),
-		Description: openai.String(
-			"Store a durable long-term memory about the user, project, or agent behavior. Use only for stable, reusable facts, explicit preferences, or standing instructions; never store secrets or transient chat details.",
-		),
-		Parameters: openai.FunctionParameters{
+func (t *RememberTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return NewToolInfo(
+		AgentToolRemember,
+		"Store a durable long-term memory about the user, project, or agent behavior. Use only for stable, reusable facts, explicit preferences, or standing instructions; never store secrets or transient chat details.",
+		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"category": map[string]any{
@@ -89,7 +86,7 @@ func (t *RememberTool) Info() openai.ChatCompletionToolUnionParam {
 			"required":             []string{"category", "content"},
 			"additionalProperties": false,
 		},
-	})
+	)
 }
 
 func (t *RememberTool) Execute(ctx context.Context, argumentsInJSON string) (string, error) {
@@ -122,13 +119,11 @@ func (t *ForgetMemoryTool) ToolName() AgentTool {
 	return AgentToolForgetMemory
 }
 
-func (t *ForgetMemoryTool) Info() openai.ChatCompletionToolUnionParam {
-	return openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-		Name: string(AgentToolForgetMemory),
-		Description: openai.String(
-			"Delete a long-term memory by id when it is stale, wrong, or the user asks to forget it.",
-		),
-		Parameters: openai.FunctionParameters{
+func (t *ForgetMemoryTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return NewToolInfo(
+		AgentToolForgetMemory,
+		"Delete a long-term memory by id when it is stale, wrong, or the user asks to forget it.",
+		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"id": map[string]any{
@@ -139,7 +134,7 @@ func (t *ForgetMemoryTool) Info() openai.ChatCompletionToolUnionParam {
 			"required":             []string{"id"},
 			"additionalProperties": false,
 		},
-	})
+	)
 }
 
 func (t *ForgetMemoryTool) Execute(ctx context.Context, argumentsInJSON string) (string, error) {

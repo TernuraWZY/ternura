@@ -6,8 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/shared"
+	"github.com/cloudwego/eino/schema"
 )
 
 type EditTool struct{}
@@ -26,28 +25,24 @@ func (t *EditTool) ToolName() AgentTool {
 	return AgentToolEdit
 }
 
-func (t *EditTool) Info() openai.ChatCompletionToolUnionParam {
-	return openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-		Name:        string(AgentToolEdit),
-		Description: openai.String("edit content in file"),
-		Parameters: openai.FunctionParameters{
-			"type": "object",
-			"properties": map[string]any{
-				"path": map[string]any{
-					"type":        "string",
-					"description": "the file path to edit",
-				},
-				"before": map[string]any{
-					"type":        "string",
-					"description": "the content to search for",
-				},
-				"after": map[string]any{
-					"type":        "string",
-					"description": "the content to replace with",
-				},
+func (t *EditTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return NewToolInfo(AgentToolEdit, "edit content in file", map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{
+				"type":        "string",
+				"description": "the file path to edit",
 			},
-			"required": []string{"path", "before", "after"},
+			"before": map[string]any{
+				"type":        "string",
+				"description": "the content to search for",
+			},
+			"after": map[string]any{
+				"type":        "string",
+				"description": "the content to replace with",
+			},
 		},
+		"required": []string{"path", "before", "after"},
 	})
 }
 

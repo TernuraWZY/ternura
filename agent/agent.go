@@ -13,7 +13,6 @@ import (
 	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-	einojsonschema "github.com/eino-contrib/jsonschema"
 
 	"ternura/config"
 	"ternura/tool"
@@ -141,7 +140,7 @@ func (a *Agent) ensureChatModel() error {
 	return nil
 }
 
-func (a *Agent) executeTool(ctx context.Context, runCtx *RunContext, call ToolCall) ToolResult {
+func (a *Agent) executeTool(ctx context.Context, runCtx *RunContext, call schema.ToolCall) ToolResult {
 	if runCtx != nil {
 		runCtx.ToolCallCount++
 	}
@@ -158,7 +157,7 @@ func (a *Agent) executeTool(ctx context.Context, runCtx *RunContext, call ToolCa
 		return result
 	}
 
-	content, err := a.execute(ctx, call.Name, call.Arguments)
+	content, err := a.execute(ctx, call.Function.Name, call.Function.Arguments)
 	if err != nil {
 		content = err.Error()
 	}
@@ -216,7 +215,7 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 			return result, err
 		}
 		forcedToolChoice := runCtx.RequestedToolChoice()
-		modelCall, err := a.newModelCall(runCtx)
+		modelCall, err := a.newModelCall(ctx, runCtx)
 		if err != nil {
 			return result, err
 		}
@@ -233,8 +232,7 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 		}
 		a.messages = append(a.messages, message)
 		appendThinkTrace(&result, message.Content)
-		modelResponse := modelResponseFromMessage(message, message.Content)
-		if err := a.hooks.AfterModelResponse(ctx, runCtx, modelResponse); err != nil {
+		if err := a.hooks.AfterModelResponse(ctx, runCtx, message); err != nil {
 			return result, err
 		}
 
@@ -254,11 +252,11 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 		runCtx.ClearToolChoice()
 
 		for _, toolCall := range message.ToolCalls {
-			toolResult := a.executeTool(ctx, runCtx, toolCallFromEino(toolCall))
+			toolResult := a.executeTool(ctx, runCtx, toolCall)
 			traceItem := toolTraceFromResult(toolResult)
 			result.Trace = append(result.Trace, traceItem)
-			log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Name, toolResult.Call.Arguments, toolResult.Err)
-			a.messages = append(a.messages, schema.ToolMessage(toolResult.Content, toolResult.Call.ID, schema.WithToolName(toolResult.Call.Name)))
+			log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Function.Name, toolResult.Call.Function.Arguments, toolResult.Err)
+			a.messages = append(a.messages, schema.ToolMessage(toolResult.Content, toolResult.Call.ID, schema.WithToolName(toolResult.Call.Function.Name)))
 		}
 
 	}
@@ -299,7 +297,7 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 			return result, err
 		}
 		forcedToolChoice := runCtx.RequestedToolChoice()
-		modelCall, err := a.newModelCall(runCtx)
+		modelCall, err := a.newModelCall(ctx, runCtx)
 		if err != nil {
 			return result, err
 		}
@@ -367,8 +365,7 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 			return result, err
 		}
 		a.messages = append(a.messages, message)
-		modelResponse := modelResponseFromMessage(message, result.RawContent)
-		if err := a.hooks.AfterModelResponse(ctx, runCtx, modelResponse); err != nil {
+		if err := a.hooks.AfterModelResponse(ctx, runCtx, message); err != nil {
 			return result, err
 		}
 
@@ -394,14 +391,14 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 		runCtx.ClearToolChoice()
 
 		for _, toolCall := range message.ToolCalls {
-			toolResult := a.executeTool(ctx, runCtx, toolCallFromEino(toolCall))
+			toolResult := a.executeTool(ctx, runCtx, toolCall)
 			toolTrace := toolTraceFromResult(toolResult)
 			result.Trace = append(result.Trace, toolTrace)
 			if err := emitTraceItem(emit, newTraceID(), toolTrace); err != nil {
 				return result, err
 			}
-			log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Name, toolResult.Call.Arguments, toolResult.Err)
-			toolMessages = append(toolMessages, schema.ToolMessage(toolResult.Content, toolResult.Call.ID, schema.WithToolName(toolResult.Call.Name)))
+			log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Function.Name, toolResult.Call.Function.Arguments, toolResult.Err)
+			toolMessages = append(toolMessages, schema.ToolMessage(toolResult.Content, toolResult.Call.ID, schema.WithToolName(toolResult.Call.Function.Name)))
 		}
 		a.messages = append(a.messages, toolMessages...)
 	}
@@ -413,7 +410,7 @@ type modelCallRequest struct {
 	Options  []einomodel.Option
 }
 
-func (a *Agent) newModelCall(runCtx *RunContext) (modelCallRequest, error) {
+func (a *Agent) newModelCall(ctx context.Context, runCtx *RunContext) (modelCallRequest, error) {
 	req := modelCallRequest{
 		Messages: a.messagesWithRuntimeContext(runCtx),
 		Tools:    make([]*schema.ToolInfo, 0),
@@ -427,9 +424,12 @@ func (a *Agent) newModelCall(runCtx *RunContext) (modelCallRequest, error) {
 				continue
 			}
 		}
-		info, err := einoToolInfo(t)
+		info, err := t.Info(ctx)
 		if err != nil {
 			return req, err
+		}
+		if info == nil {
+			return req, fmt.Errorf("tool %s returned nil info", t.ToolName())
 		}
 		req.Tools = append(req.Tools, info)
 		availableTools[t.ToolName()] = info
@@ -486,63 +486,11 @@ func (a *Agent) messagesWithRuntimeContext(runCtx *RunContext) []*schema.Message
 	return messages
 }
 
-func einoToolInfo(t tool.Tool) (*schema.ToolInfo, error) {
-	function := t.Info().GetFunction()
-	if function == nil {
-		return nil, fmt.Errorf("tool %s does not expose a function definition", t.ToolName())
-	}
-
-	params, err := openAIParamsToEinoSchema(function.Parameters)
-	if err != nil {
-		return nil, fmt.Errorf("convert tool %s schema: %w", t.ToolName(), err)
-	}
-	return &schema.ToolInfo{
-		Name:        function.Name,
-		Desc:        function.Description.Or(""),
-		ParamsOneOf: params,
-	}, nil
-}
-
-func openAIParamsToEinoSchema(params map[string]any) (*schema.ParamsOneOf, error) {
-	if len(params) == 0 {
-		return nil, nil
-	}
-	payload, err := json.Marshal(params)
-	if err != nil {
-		return nil, err
-	}
-	var js einojsonschema.Schema
-	if err := json.Unmarshal(payload, &js); err != nil {
-		return nil, err
-	}
-	return schema.NewParamsOneOfByJSONSchema(&js), nil
-}
-
-func modelResponseFromMessage(message *schema.Message, rawContent string) ModelResponse {
-	response := ModelResponse{
-		Content:    message.Content,
-		RawContent: rawContent,
-		ToolCalls:  make([]ToolCall, 0, len(message.ToolCalls)),
-	}
-	for _, toolCall := range message.ToolCalls {
-		response.ToolCalls = append(response.ToolCalls, toolCallFromEino(toolCall))
-	}
-	return response
-}
-
-func toolCallFromEino(toolCall schema.ToolCall) ToolCall {
-	return ToolCall{
-		ID:        toolCall.ID,
-		Name:      toolCall.Function.Name,
-		Arguments: toolCall.Function.Arguments,
-	}
-}
-
 func toolTraceFromResult(result ToolResult) AgentTraceItem {
 	return AgentTraceItem{
 		Type:    "tool",
-		Title:   fmt.Sprintf("Tool use: %s", result.Call.Name),
-		Content: formatToolTrace(result.Call.Arguments, result.Content, result.Err),
+		Title:   fmt.Sprintf("Tool use: %s", result.Call.Function.Name),
+		Content: formatToolTrace(result.Call.Function.Arguments, result.Content, result.Err),
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/cloudwego/eino/schema"
+
 	"ternura/tool"
 )
 
@@ -188,20 +190,14 @@ func (r *RunContext) RuntimeContextText() string {
 	return strings.Join(sections, "\n")
 }
 
-type ToolCall struct {
-	ID        string
-	Name      string
-	Arguments string
-}
-
 type ToolResult struct {
-	Call    ToolCall
+	Call    schema.ToolCall
 	Content string
 	Err     error
 }
 
 type ToolExecution struct {
-	Call    ToolCall
+	Call    schema.ToolCall
 	Content string
 	Error   string
 }
@@ -211,12 +207,6 @@ func (r ToolResult) ErrorString() string {
 		return ""
 	}
 	return r.Err.Error()
-}
-
-type ModelResponse struct {
-	Content    string
-	RawContent string
-	ToolCalls  []ToolCall
 }
 
 type Hook interface{}
@@ -238,11 +228,11 @@ type BeforeModelCallHook interface {
 }
 
 type AfterModelResponseHook interface {
-	AfterModelResponse(ctx context.Context, run *RunContext, response ModelResponse) error
+	AfterModelResponse(ctx context.Context, run *RunContext, response *schema.Message) error
 }
 
 type BeforeToolCallHook interface {
-	BeforeToolCall(ctx context.Context, run *RunContext, call *ToolCall) error
+	BeforeToolCall(ctx context.Context, run *RunContext, call *schema.ToolCall) error
 }
 
 type AfterToolCallHook interface {
@@ -329,7 +319,7 @@ func (m *HookManager) BeforeModelCall(ctx context.Context, run *RunContext) erro
 	return nil
 }
 
-func (m *HookManager) AfterModelResponse(ctx context.Context, run *RunContext, response ModelResponse) error {
+func (m *HookManager) AfterModelResponse(ctx context.Context, run *RunContext, response *schema.Message) error {
 	if m == nil {
 		return nil
 	}
@@ -343,7 +333,7 @@ func (m *HookManager) AfterModelResponse(ctx context.Context, run *RunContext, r
 	return nil
 }
 
-func (m *HookManager) BeforeToolCall(ctx context.Context, run *RunContext, call *ToolCall) error {
+func (m *HookManager) BeforeToolCall(ctx context.Context, run *RunContext, call *schema.ToolCall) error {
 	if m == nil {
 		return nil
 	}

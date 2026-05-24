@@ -2,8 +2,10 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 
-	"github.com/openai/openai-go/v3"
+	"github.com/cloudwego/eino/schema"
+	einojsonschema "github.com/eino-contrib/jsonschema"
 )
 
 type AgentTool string
@@ -21,6 +23,26 @@ const (
 
 type Tool interface {
 	ToolName() AgentTool
-	Info() openai.ChatCompletionToolUnionParam
+	Info(ctx context.Context) (*schema.ToolInfo, error)
 	Execute(ctx context.Context, argumentsInJSON string) (string, error)
+}
+
+func NewToolInfo(name AgentTool, desc string, params map[string]any) (*schema.ToolInfo, error) {
+	info := &schema.ToolInfo{
+		Name: string(name),
+		Desc: desc,
+	}
+	if len(params) == 0 {
+		return info, nil
+	}
+	payload, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	var js einojsonschema.Schema
+	if err := json.Unmarshal(payload, &js); err != nil {
+		return nil, err
+	}
+	info.ParamsOneOf = schema.NewParamsOneOfByJSONSchema(&js)
+	return info, nil
 }

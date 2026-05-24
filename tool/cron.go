@@ -7,8 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/shared"
+	"github.com/cloudwego/eino/schema"
 )
 
 // CronAddParams 创建 cron 任务。
@@ -54,16 +53,15 @@ func (t *CronTool) ToolName() AgentTool {
 	return AgentToolCron
 }
 
-func (t *CronTool) Info() openai.ChatCompletionToolUnionParam {
-	return openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-		Name: string(AgentToolCron),
-		Description: openai.String(
-			"Schedule reminders and recurring tasks. Actions: add, list, remove. " +
-				"Use add with message plus exactly one schedule: every_seconds, cron_expr (+ optional tz), or at (ISO datetime). " +
-				"For relative delays like '2 minutes', use delay_seconds on add. " +
-				"Do not claim a job exists until this tool succeeds.",
-		),
-		Parameters: openai.FunctionParameters{
+func (t *CronTool) Info(context.Context) (*schema.ToolInfo, error) {
+	desc := "Schedule reminders and recurring tasks. Actions: add, list, remove. " +
+		"Use add with message plus exactly one schedule: every_seconds, cron_expr (+ optional tz), or at (ISO datetime). " +
+		"For relative delays like '2 minutes', use delay_seconds on add. " +
+		"Do not claim a job exists until this tool succeeds."
+	return NewToolInfo(
+		AgentToolCron,
+		desc,
+		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"action": map[string]any{
@@ -111,7 +109,7 @@ func (t *CronTool) Info() openai.ChatCompletionToolUnionParam {
 			"required":             []string{"action"},
 			"additionalProperties": false,
 		},
-	})
+	)
 }
 
 func (t *CronTool) Execute(ctx context.Context, argumentsInJSON string) (string, error) {

@@ -103,7 +103,7 @@ func (h *stateGuardHook) successfulCronToolIDs(run *agent.RunContext, result *ag
 	ids := make([]string, 0)
 	if run != nil {
 		for _, item := range run.ToolResults() {
-			if item.Call.Name != string(tool.AgentToolCron) || item.Error != "" {
+			if item.Call.Function.Name != string(tool.AgentToolCron) || item.Error != "" {
 				continue
 			}
 			ids = append(ids, cronJobIDPattern.FindAllString(item.Content, -1)...)

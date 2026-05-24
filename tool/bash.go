@@ -6,8 +6,7 @@ import (
 	"os/exec"
 	"runtime"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/shared"
+	"github.com/cloudwego/eino/schema"
 )
 
 type BashTool struct{}
@@ -24,20 +23,16 @@ func (t *BashTool) ToolName() AgentTool {
 	return AgentToolBash
 }
 
-func (t *BashTool) Info() openai.ChatCompletionToolUnionParam {
-	return openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-		Name:        string(AgentToolBash),
-		Description: openai.String("execute bash command"),
-		Parameters: openai.FunctionParameters{
-			"type": "object",
-			"properties": map[string]any{
-				"command": map[string]any{
-					"type":        "string",
-					"description": "the bash command to execute",
-				},
+func (t *BashTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return NewToolInfo(AgentToolBash, "execute bash command", map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"command": map[string]any{
+				"type":        "string",
+				"description": "the bash command to execute",
 			},
-			"required": []string{"command"},
 		},
+		"required": []string{"command"},
 	})
 }
 

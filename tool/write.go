@@ -5,8 +5,7 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/shared"
+	"github.com/cloudwego/eino/schema"
 )
 
 type WriteTool struct{}
@@ -24,24 +23,20 @@ func (t *WriteTool) ToolName() AgentTool {
 	return AgentToolWrite
 }
 
-func (t *WriteTool) Info() openai.ChatCompletionToolUnionParam {
-	return openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-		Name:        string(AgentToolWrite),
-		Description: openai.String("write content to file"),
-		Parameters: openai.FunctionParameters{
-			"type": "object",
-			"properties": map[string]any{
-				"path": map[string]any{
-					"type":        "string",
-					"description": "the file path to write",
-				},
-				"content": map[string]any{
-					"type":        "string",
-					"description": "the content to write to the file",
-				},
+func (t *WriteTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return NewToolInfo(AgentToolWrite, "write content to file", map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{
+				"type":        "string",
+				"description": "the file path to write",
 			},
-			"required": []string{"path", "content"},
+			"content": map[string]any{
+				"type":        "string",
+				"description": "the content to write to the file",
+			},
 		},
+		"required": []string{"path", "content"},
 	})
 }
 

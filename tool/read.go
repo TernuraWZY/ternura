@@ -7,8 +7,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/shared"
+	"github.com/cloudwego/eino/schema"
 )
 
 type ReadTool struct{}
@@ -25,20 +24,16 @@ func (t *ReadTool) ToolName() AgentTool {
 	return AgentToolRead
 }
 
-func (t *ReadTool) Info() openai.ChatCompletionToolUnionParam {
-	return openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-		Name:        string(AgentToolRead),
-		Description: openai.String("read file content"),
-		Parameters: openai.FunctionParameters{
-			"type": "object",
-			"properties": map[string]any{
-				"path": map[string]any{
-					"type":        "string",
-					"description": "the file path to read",
-				},
+func (t *ReadTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return NewToolInfo(AgentToolRead, "read file content", map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{
+				"type":        "string",
+				"description": "the file path to read",
 			},
-			"required": []string{"path"},
 		},
+		"required": []string{"path"},
 	})
 }
 

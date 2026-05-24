@@ -6,8 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/shared"
+	"github.com/cloudwego/eino/schema"
 )
 
 const (
@@ -45,13 +44,11 @@ func (t *UpdateTodosTool) ToolName() AgentTool {
 	return AgentToolUpdateTodos
 }
 
-func (t *UpdateTodosTool) Info() openai.ChatCompletionToolUnionParam {
-	return openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
-		Name: string(AgentToolUpdateTodos),
-		Description: openai.String(
-			"Replace the current session todo list with the complete ordered task plan. Use this for multi-step tasks and whenever task status changes.",
-		),
-		Parameters: openai.FunctionParameters{
+func (t *UpdateTodosTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return NewToolInfo(
+		AgentToolUpdateTodos,
+		"Replace the current session todo list with the complete ordered task plan. Use this for multi-step tasks and whenever task status changes.",
+		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"todos": map[string]any{
@@ -82,7 +79,7 @@ func (t *UpdateTodosTool) Info() openai.ChatCompletionToolUnionParam {
 			"required":             []string{"todos"},
 			"additionalProperties": false,
 		},
-	})
+	)
 }
 
 func (t *UpdateTodosTool) Execute(ctx context.Context, argumentsInJSON string) (string, error) {
