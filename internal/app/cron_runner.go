@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"ternura"
-	"ternura/main/cron"
+	"ternura/agent"
+	"ternura/internal/cron"
 	"ternura/tool"
 )
 
@@ -240,21 +240,21 @@ func formatCronTiming(job cron.Job) string {
 	}
 }
 
-func (s *agentServer) newAgentForSession(sessionID string) *ternura.Agent {
+func (s *agentServer) newAgentForSession(sessionID string) *agent.Agent {
 	return s.newAgentForSessionWithCron(sessionID, tool.NewCronTool(s.cronAddForSession(sessionID), s.cronList, s.cronRemove))
 }
 
-func (s *agentServer) newAgentForSessionWithCron(sessionID string, cronTool *tool.CronTool) *ternura.Agent {
-	agent := ternura.NewAgent(
+func (s *agentServer) newAgentForSessionWithCron(sessionID string, cronTool *tool.CronTool) *agent.Agent {
+	sessionAgent := agent.NewAgent(
 		s.modelConf,
-		ternura.TernuraAgentSystemPrompt,
+		agent.TernuraAgentSystemPrompt,
 		newAgentTools(
 			s.updateTodosForSession(sessionID),
 			s.rememberMemory,
 			s.forgetMemory,
 			cronTool,
 		),
-		ternura.WithHooks(
+		agent.WithHooks(
 			newCurrentTimeHook(),
 			newMemoryHook(s.memory, func() string { return sessionID }),
 			newScheduleGuidanceHook(),
@@ -264,7 +264,7 @@ func (s *agentServer) newAgentForSessionWithCron(sessionID string, cronTool *too
 
 	snapshot := s.store.Snapshot()
 	if session := findSession(snapshot.Sessions, sessionID); session != nil && len(session.Messages) > 0 {
-		restoreAgentConversation(agent, session.Messages)
+		restoreAgentConversation(sessionAgent, session.Messages)
 	}
-	return agent
+	return sessionAgent
 }

@@ -1,26 +1,29 @@
-package ternura
+package agent
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
+	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
+	einomodel "github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
+	einojsonschema "github.com/eino-contrib/jsonschema"
 
-	"ternura/shared"
+	"ternura/config"
 	"ternura/tool"
 )
 
 type Agent struct {
 	systemPrompt string
 	model        string
-	client       openai.Client
-	messages     []openai.ChatCompletionMessageParamUnion
+	chatModel    einomodel.BaseChatModel
+	messages     []*schema.Message
 	tools        map[tool.AgentTool]tool.Tool
 	hooks        *HookManager
 }
@@ -77,13 +80,25 @@ func WithHookManager(manager *HookManager) AgentOption {
 	}
 }
 
-func NewAgent(modelConf shared.ModelConfig, systemPrompt string, tools []tool.Tool, opts ...AgentOption) *Agent {
+func NewAgent(modelConf config.ModelConfig, systemPrompt string, tools []tool.Tool, opts ...AgentOption) *Agent {
+	chatModel, err := einoopenai.NewChatModel(context.Background(), &einoopenai.ChatModelConfig{
+		BaseURL: modelConf.BaseURL,
+		APIKey:  modelConf.ApiKey,
+		Model:   modelConf.Model,
+		ExtraFields: map[string]any{
+			"parallel_tool_calls": false,
+		},
+	})
+	if err != nil {
+		log.Printf("create Eino OpenAI chat model: %v", err)
+	}
+
 	a := Agent{
 		systemPrompt: systemPrompt,
 		model:        modelConf.Model,
-		client:       openai.NewClient(option.WithBaseURL(modelConf.BaseURL), option.WithAPIKey(modelConf.ApiKey)),
+		chatModel:    chatModel,
 		tools:        make(map[tool.AgentTool]tool.Tool),
-		messages:     make([]openai.ChatCompletionMessageParamUnion, 0),
+		messages:     make([]*schema.Message, 0),
 		hooks:        NewHookManager(),
 	}
 	for _, t := range tools {
@@ -94,19 +109,19 @@ func NewAgent(modelConf shared.ModelConfig, systemPrompt string, tools []tool.To
 			opt(&a)
 		}
 	}
-	a.messages = append(a.messages, openai.SystemMessage(systemPrompt))
+	a.messages = append(a.messages, schema.SystemMessage(systemPrompt))
 	return &a
 }
 
 func (a *Agent) RestoreConversation(messages []ConversationMessage) {
-	a.messages = make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
-	a.messages = append(a.messages, openai.SystemMessage(a.systemPrompt))
+	a.messages = make([]*schema.Message, 0, len(messages)+1)
+	a.messages = append(a.messages, schema.SystemMessage(a.systemPrompt))
 	for _, message := range messages {
 		switch message.Role {
 		case "user":
-			a.messages = append(a.messages, openai.UserMessage(message.Content))
+			a.messages = append(a.messages, schema.UserMessage(message.Content))
 		case "assistant":
-			a.messages = append(a.messages, openai.AssistantMessage(message.Content))
+			a.messages = append(a.messages, schema.AssistantMessage(message.Content, nil))
 		}
 	}
 }
@@ -117,6 +132,13 @@ func (a *Agent) execute(ctx context.Context, toolName string, argumentsInJSON st
 		return "", errors.New("tool not found")
 	}
 	return t.Execute(ctx, argumentsInJSON)
+}
+
+func (a *Agent) ensureChatModel() error {
+	if a.chatModel == nil {
+		return errors.New("chat model is not initialized")
+	}
+	return nil
 }
 
 func (a *Agent) executeTool(ctx context.Context, runCtx *RunContext, call ToolCall) ToolResult {
@@ -177,7 +199,7 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 		}
 	}()
 
-	a.messages = append(a.messages, openai.UserMessage(query))
+	a.messages = append(a.messages, schema.UserMessage(query))
 	if err := a.hooks.AfterUserMessage(ctx, runCtx); err != nil {
 		return result, err
 	}
@@ -190,35 +212,28 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 		if err := a.hooks.BeforeModelCall(ctx, runCtx); err != nil {
 			return result, err
 		}
+		if err := a.ensureChatModel(); err != nil {
+			return result, err
+		}
 		forcedToolChoice := runCtx.RequestedToolChoice()
-		params := a.newChatCompletionParams(runCtx)
+		modelCall, err := a.newModelCall(runCtx)
+		if err != nil {
+			return result, err
+		}
 
 		log.Printf("calling llm model %s...", a.model)
-		resp, err := a.client.Chat.Completions.New(ctx, params)
+		message, err := a.chatModel.Generate(ctx, modelCall.Messages, modelCall.Options...)
 		if err != nil {
 			log.Printf("failed to send a new completion request: %v", err)
 			return AgentRunResult{}, err
 		}
-		if len(resp.Choices) == 0 {
-			log.Printf("no choices returned, resp: %v", resp)
+		if message == nil {
+			log.Printf("no message returned")
 			return result, nil
 		}
-		message := resp.Choices[0].Message
-		// 拼接 assistant message 到整体消息链中
-		a.messages = append(a.messages, message.ToParam())
+		a.messages = append(a.messages, message)
 		appendThinkTrace(&result, message.Content)
-		modelResponse := ModelResponse{
-			Content:    message.Content,
-			RawContent: message.Content,
-			ToolCalls:  make([]ToolCall, 0, len(message.ToolCalls)),
-		}
-		for _, toolCall := range message.ToolCalls {
-			modelResponse.ToolCalls = append(modelResponse.ToolCalls, ToolCall{
-				ID:        toolCall.ID,
-				Name:      toolCall.Function.Name,
-				Arguments: toolCall.Function.Arguments,
-			})
-		}
+		modelResponse := modelResponseFromMessage(message, message.Content)
 		if err := a.hooks.AfterModelResponse(ctx, runCtx, modelResponse); err != nil {
 			return result, err
 		}
@@ -239,16 +254,11 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 		runCtx.ClearToolChoice()
 
 		for _, toolCall := range message.ToolCalls {
-			toolResult := a.executeTool(ctx, runCtx, ToolCall{
-				ID:        toolCall.ID,
-				Name:      toolCall.Function.Name,
-				Arguments: toolCall.Function.Arguments,
-			})
+			toolResult := a.executeTool(ctx, runCtx, toolCallFromEino(toolCall))
 			traceItem := toolTraceFromResult(toolResult)
 			result.Trace = append(result.Trace, traceItem)
 			log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Name, toolResult.Call.Arguments, toolResult.Err)
-			// 返回 tool message 到整体消息链中
-			a.messages = append(a.messages, openai.ToolMessage(toolResult.Content, toolResult.Call.ID))
+			a.messages = append(a.messages, schema.ToolMessage(toolResult.Content, toolResult.Call.ID, schema.WithToolName(toolResult.Call.Name)))
 		}
 
 	}
@@ -266,7 +276,7 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 		}
 	}()
 
-	a.messages = append(a.messages, openai.UserMessage(query))
+	a.messages = append(a.messages, schema.UserMessage(query))
 	if err := a.hooks.AfterUserMessage(ctx, runCtx); err != nil {
 		return result, err
 	}
@@ -285,14 +295,22 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 		if err := a.hooks.BeforeModelCall(ctx, runCtx); err != nil {
 			return result, err
 		}
+		if err := a.ensureChatModel(); err != nil {
+			return result, err
+		}
 		forcedToolChoice := runCtx.RequestedToolChoice()
-		params := a.newChatCompletionParams(runCtx)
-		toolMessages := make([]openai.ChatCompletionMessageParamUnion, 0)
-		executedToolCalls := make(map[string]bool)
+		modelCall, err := a.newModelCall(runCtx)
+		if err != nil {
+			return result, err
+		}
+		toolMessages := make([]*schema.Message, 0)
 
 		log.Printf("streaming llm model %s...", a.model)
-		stream := a.client.Chat.Completions.NewStreaming(ctx, params)
-		acc := openai.ChatCompletionAccumulator{}
+		stream, err := a.chatModel.Stream(ctx, modelCall.Messages, modelCall.Options...)
+		if err != nil {
+			log.Printf("failed to stream completion request: %v", err)
+			return result, err
+		}
 		contentRouter := newStreamingContentRouter(
 			func() string { return newTraceID() },
 			func(event AgentStreamEvent) error {
@@ -312,67 +330,44 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 			},
 		)
 
-		for stream.Next() {
-			chunk := stream.Current()
-			if !acc.AddChunk(chunk) {
-				return result, errors.New("failed to accumulate stream chunk")
+		chunks := make([]*schema.Message, 0)
+		for {
+			chunk, err := stream.Recv()
+			if errors.Is(err, io.EOF) {
+				break
 			}
-
-			for _, choice := range chunk.Choices {
-				if choice.Delta.Content != "" {
-					result.RawContent += choice.Delta.Content
-					if err := contentRouter.Write(choice.Delta.Content); err != nil {
-						return result, err
-					}
-				}
+			if err != nil {
+				stream.Close()
+				log.Printf("failed to stream completion request: %v", err)
+				return result, err
 			}
-
-			if toolCall, ok := acc.JustFinishedToolCall(); ok {
-				if err := contentRouter.Flush(); err != nil {
+			if chunk == nil {
+				continue
+			}
+			chunks = append(chunks, chunk)
+			if chunk.Content != "" {
+				result.RawContent += chunk.Content
+				if err := contentRouter.Write(chunk.Content); err != nil {
+					stream.Close()
 					return result, err
 				}
-				toolResult := a.executeTool(ctx, runCtx, ToolCall{
-					ID:        toolCall.ID,
-					Name:      toolCall.Name,
-					Arguments: toolCall.Arguments,
-				})
-				toolTrace := toolTraceFromResult(toolResult)
-				result.Trace = append(result.Trace, toolTrace)
-				if err := emitTraceItem(emit, newTraceID(), toolTrace); err != nil {
-					return result, err
-				}
-				log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Name, toolResult.Call.Arguments, toolResult.Err)
-				toolMessages = append(toolMessages, openai.ToolMessage(toolResult.Content, toolResult.Call.ID))
-				executedToolCalls[toolCall.ID] = true
 			}
 		}
-
-		if err := stream.Err(); err != nil {
-			log.Printf("failed to stream completion request: %v", err)
-			return result, err
-		}
+		stream.Close()
 		if err := contentRouter.Flush(); err != nil {
 			return result, err
 		}
 
-		if len(acc.Choices) == 0 {
+		if len(chunks) == 0 {
 			return result, nil
 		}
 
-		message := acc.Choices[0].Message
-		a.messages = append(a.messages, message.ToParam())
-		modelResponse := ModelResponse{
-			Content:    message.Content,
-			RawContent: result.RawContent,
-			ToolCalls:  make([]ToolCall, 0, len(message.ToolCalls)),
+		message, err := schema.ConcatMessages(chunks)
+		if err != nil {
+			return result, err
 		}
-		for _, toolCall := range message.ToolCalls {
-			modelResponse.ToolCalls = append(modelResponse.ToolCalls, ToolCall{
-				ID:        toolCall.ID,
-				Name:      toolCall.Function.Name,
-				Arguments: toolCall.Function.Arguments,
-			})
-		}
+		a.messages = append(a.messages, message)
+		modelResponse := modelResponseFromMessage(message, result.RawContent)
 		if err := a.hooks.AfterModelResponse(ctx, runCtx, modelResponse); err != nil {
 			return result, err
 		}
@@ -399,79 +394,79 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 		runCtx.ClearToolChoice()
 
 		for _, toolCall := range message.ToolCalls {
-			if executedToolCalls[toolCall.ID] {
-				continue
-			}
-			toolResult := a.executeTool(ctx, runCtx, ToolCall{
-				ID:        toolCall.ID,
-				Name:      toolCall.Function.Name,
-				Arguments: toolCall.Function.Arguments,
-			})
+			toolResult := a.executeTool(ctx, runCtx, toolCallFromEino(toolCall))
 			toolTrace := toolTraceFromResult(toolResult)
 			result.Trace = append(result.Trace, toolTrace)
 			if err := emitTraceItem(emit, newTraceID(), toolTrace); err != nil {
 				return result, err
 			}
 			log.Printf("tool call %s, arguments %s, error: %v", toolResult.Call.Name, toolResult.Call.Arguments, toolResult.Err)
-			toolMessages = append(toolMessages, openai.ToolMessage(toolResult.Content, toolResult.Call.ID))
+			toolMessages = append(toolMessages, schema.ToolMessage(toolResult.Content, toolResult.Call.ID, schema.WithToolName(toolResult.Call.Name)))
 		}
 		a.messages = append(a.messages, toolMessages...)
 	}
 }
 
-func (a *Agent) newChatCompletionParams(runCtx *RunContext) openai.ChatCompletionNewParams {
-	params := openai.ChatCompletionNewParams{
-		Model:             a.model,
-		Messages:          a.messagesWithRuntimeContext(runCtx),
-		Tools:             make([]openai.ChatCompletionToolUnionParam, 0),
-		ParallelToolCalls: openai.Bool(false),
+type modelCallRequest struct {
+	Messages []*schema.Message
+	Tools    []*schema.ToolInfo
+	Options  []einomodel.Option
+}
+
+func (a *Agent) newModelCall(runCtx *RunContext) (modelCallRequest, error) {
+	req := modelCallRequest{
+		Messages: a.messagesWithRuntimeContext(runCtx),
+		Tools:    make([]*schema.ToolInfo, 0),
+		Options:  make([]einomodel.Option, 0),
 	}
 
-	availableTools := make(map[tool.AgentTool]struct{})
+	availableTools := make(map[tool.AgentTool]*schema.ToolInfo)
 	for _, t := range a.tools {
 		if runCtx != nil {
 			if _, disabled := runCtx.ToolDisabled(t.ToolName()); disabled {
 				continue
 			}
 		}
-		params.Tools = append(params.Tools, t.Info())
-		availableTools[t.ToolName()] = struct{}{}
+		info, err := einoToolInfo(t)
+		if err != nil {
+			return req, err
+		}
+		req.Tools = append(req.Tools, info)
+		availableTools[t.ToolName()] = info
 	}
 
-	if choice, ok := resolveToolChoice(runCtx, availableTools); ok {
-		params.ToolChoice = choice
+	req.Tools, req.Options = resolveToolChoice(runCtx, req.Tools, availableTools)
+	if len(req.Tools) > 0 {
+		req.Options = append([]einomodel.Option{einomodel.WithTools(req.Tools)}, req.Options...)
 	}
-	return params
+	return req, nil
 }
 
-// resolveToolChoice 把 RunContext 上的 ToolChoice 翻译成 openai-go 的请求字段。
-// 当目标工具不可用或不在本轮工具集时，会自动降级为不设置（等价 auto），避免请求被服务端 422。
-func resolveToolChoice(runCtx *RunContext, available map[tool.AgentTool]struct{}) (openai.ChatCompletionToolChoiceOptionUnionParam, bool) {
+// resolveToolChoice 把 RunContext 上的 ToolChoice 翻译成 Eino model options。
+// 当目标工具不可用或不在本轮工具集时，会自动降级为不设置（等价 auto），避免请求被服务端拒绝。
+func resolveToolChoice(runCtx *RunContext, tools []*schema.ToolInfo, available map[tool.AgentTool]*schema.ToolInfo) ([]*schema.ToolInfo, []einomodel.Option) {
 	if runCtx == nil {
-		return openai.ChatCompletionToolChoiceOptionUnionParam{}, false
+		return tools, nil
 	}
 	choice := runCtx.RequestedToolChoice()
 	switch choice.Mode {
 	case ToolChoiceRequired:
-		if len(available) == 0 {
-			return openai.ChatCompletionToolChoiceOptionUnionParam{}, false
+		if len(tools) == 0 {
+			return tools, nil
 		}
-		return openai.ChatCompletionToolChoiceOptionUnionParam{
-			OfAuto: openai.String("required"),
-		}, true
+		return tools, []einomodel.Option{einomodel.WithToolChoice(schema.ToolChoiceForced)}
 	case ToolChoiceSpecific:
-		if _, ok := available[choice.Name]; !ok {
-			return openai.ChatCompletionToolChoiceOptionUnionParam{}, false
+		info, ok := available[choice.Name]
+		if !ok {
+			return tools, nil
 		}
-		return openai.ToolChoiceOptionFunctionToolChoice(openai.ChatCompletionNamedToolChoiceFunctionParam{
-			Name: string(choice.Name),
-		}), true
+		return []*schema.ToolInfo{info}, []einomodel.Option{einomodel.WithToolChoice(schema.ToolChoiceForced)}
 	default:
-		return openai.ChatCompletionToolChoiceOptionUnionParam{}, false
+		return tools, nil
 	}
 }
 
-func (a *Agent) messagesWithRuntimeContext(runCtx *RunContext) []openai.ChatCompletionMessageParamUnion {
+func (a *Agent) messagesWithRuntimeContext(runCtx *RunContext) []*schema.Message {
 	runtimeContext := ""
 	if runCtx != nil {
 		runtimeContext = runCtx.RuntimeContextText()
@@ -481,14 +476,66 @@ func (a *Agent) messagesWithRuntimeContext(runCtx *RunContext) []openai.ChatComp
 		return a.messages
 	}
 
-	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(a.messages)+1)
+	messages := make([]*schema.Message, 0, len(a.messages)+1)
 	systemContent := strings.TrimSpace(a.systemPrompt + "\n\n" + runtimeContext)
-	messages = append(messages, openai.SystemMessage(systemContent))
+	messages = append(messages, schema.SystemMessage(systemContent))
 	if len(a.messages) == 0 {
 		return messages
 	}
 	messages = append(messages, a.messages[1:]...)
 	return messages
+}
+
+func einoToolInfo(t tool.Tool) (*schema.ToolInfo, error) {
+	function := t.Info().GetFunction()
+	if function == nil {
+		return nil, fmt.Errorf("tool %s does not expose a function definition", t.ToolName())
+	}
+
+	params, err := openAIParamsToEinoSchema(function.Parameters)
+	if err != nil {
+		return nil, fmt.Errorf("convert tool %s schema: %w", t.ToolName(), err)
+	}
+	return &schema.ToolInfo{
+		Name:        function.Name,
+		Desc:        function.Description.Or(""),
+		ParamsOneOf: params,
+	}, nil
+}
+
+func openAIParamsToEinoSchema(params map[string]any) (*schema.ParamsOneOf, error) {
+	if len(params) == 0 {
+		return nil, nil
+	}
+	payload, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	var js einojsonschema.Schema
+	if err := json.Unmarshal(payload, &js); err != nil {
+		return nil, err
+	}
+	return schema.NewParamsOneOfByJSONSchema(&js), nil
+}
+
+func modelResponseFromMessage(message *schema.Message, rawContent string) ModelResponse {
+	response := ModelResponse{
+		Content:    message.Content,
+		RawContent: rawContent,
+		ToolCalls:  make([]ToolCall, 0, len(message.ToolCalls)),
+	}
+	for _, toolCall := range message.ToolCalls {
+		response.ToolCalls = append(response.ToolCalls, toolCallFromEino(toolCall))
+	}
+	return response
+}
+
+func toolCallFromEino(toolCall schema.ToolCall) ToolCall {
+	return ToolCall{
+		ID:        toolCall.ID,
+		Name:      toolCall.Function.Name,
+		Arguments: toolCall.Function.Arguments,
+	}
 }
 
 func toolTraceFromResult(result ToolResult) AgentTraceItem {
@@ -776,7 +823,7 @@ func (a *Agent) retryIgnoredToolChoice(_ context.Context, runCtx *RunContext, fo
 	}
 	runCtx.Metadata[ignoredToolChoiceRetryKey] = true
 	runCtx.SetToolChoice(forced)
-	a.messages = append(a.messages, openai.UserMessage(
+	a.messages = append(a.messages, schema.UserMessage(
 		"You must call the required tool before claiming the action succeeded. Call it now with valid arguments.",
 	))
 	return true

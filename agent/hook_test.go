@@ -1,4 +1,4 @@
-package ternura
+package agent
 
 import (
 	"context"
@@ -6,7 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"ternura/shared"
+	einomodel "github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
+
+	"ternura/config"
 	"ternura/tool"
 )
 
@@ -28,7 +31,7 @@ func TestRunContextContextBlocksReplaceAndRender(t *testing.T) {
 	}
 }
 
-func TestChatCompletionParamsFilterDisabledTools(t *testing.T) {
+func TestModelCallFiltersDisabledTools(t *testing.T) {
 	agent := NewAgent(testModelConfig(), "system", []tool.Tool{
 		tool.NewReadTool(),
 		tool.NewBashTool(),
@@ -36,79 +39,102 @@ func TestChatCompletionParamsFilterDisabledTools(t *testing.T) {
 	runCtx := NewRunContext("hello", RunModeSync)
 	runCtx.DisableTool(tool.AgentToolBash, "shell disabled")
 
-	params := agent.newChatCompletionParams(runCtx)
+	req, err := agent.newModelCall(runCtx)
 
-	if len(params.Tools) != 1 {
-		t.Fatalf("tools = %d, want 1 enabled tool", len(params.Tools))
+	if err != nil {
+		t.Fatalf("new model call: %v", err)
+	}
+	if len(req.Tools) != 1 {
+		t.Fatalf("tools = %d, want 1 enabled tool", len(req.Tools))
 	}
 }
 
-func TestChatCompletionParamsDefaultsToolChoiceToAuto(t *testing.T) {
+func TestModelCallDefaultsToolChoiceToAuto(t *testing.T) {
 	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
 	runCtx := NewRunContext("hello", RunModeSync)
 
-	params := agent.newChatCompletionParams(runCtx)
-
-	if params.ToolChoice.OfFunctionToolChoice != nil {
-		t.Fatalf("expected no specific tool choice by default, got %+v", params.ToolChoice.OfFunctionToolChoice)
+	req, err := agent.newModelCall(runCtx)
+	if err != nil {
+		t.Fatalf("new model call: %v", err)
 	}
-	if params.ToolChoice.OfAuto.Valid() {
-		t.Fatalf("expected OfAuto to be unset, got %q", params.ToolChoice.OfAuto.Value)
+	opts := einomodel.GetCommonOptions(&einomodel.Options{}, req.Options...)
+
+	if opts.ToolChoice != nil {
+		t.Fatalf("expected no tool choice by default, got %+v", opts.ToolChoice)
 	}
 }
 
-func TestChatCompletionParamsAppliesSpecificToolChoice(t *testing.T) {
+func TestModelCallAppliesSpecificToolChoice(t *testing.T) {
 	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
 	runCtx := NewRunContext("run command", RunModeSync)
 	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceSpecific, Name: tool.AgentToolBash})
 
-	params := agent.newChatCompletionParams(runCtx)
-
-	if params.ToolChoice.OfFunctionToolChoice == nil {
-		t.Fatalf("expected specific tool choice to be set")
+	req, err := agent.newModelCall(runCtx)
+	if err != nil {
+		t.Fatalf("new model call: %v", err)
 	}
-	if got := params.ToolChoice.OfFunctionToolChoice.Function.Name; got != string(tool.AgentToolBash) {
+	opts := einomodel.GetCommonOptions(&einomodel.Options{}, req.Options...)
+
+	if opts.ToolChoice == nil || *opts.ToolChoice != schema.ToolChoiceForced {
+		t.Fatalf("expected forced tool choice, got %+v", opts.ToolChoice)
+	}
+	if len(opts.Tools) != 1 {
+		t.Fatalf("tools = %d, want only selected tool", len(opts.Tools))
+	}
+	if got := opts.Tools[0].Name; got != string(tool.AgentToolBash) {
 		t.Fatalf("tool choice name = %q, want %q", got, string(tool.AgentToolBash))
 	}
 }
 
-func TestChatCompletionParamsAppliesRequiredToolChoice(t *testing.T) {
-	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
+func TestModelCallAppliesRequiredToolChoice(t *testing.T) {
+	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewReadTool(), tool.NewBashTool()})
 	runCtx := NewRunContext("run command", RunModeSync)
 	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceRequired})
 
-	params := agent.newChatCompletionParams(runCtx)
-
-	if !params.ToolChoice.OfAuto.Valid() {
-		t.Fatalf("expected OfAuto to be set to \"required\"")
+	req, err := agent.newModelCall(runCtx)
+	if err != nil {
+		t.Fatalf("new model call: %v", err)
 	}
-	if got := params.ToolChoice.OfAuto.Value; got != "required" {
-		t.Fatalf("tool choice = %q, want \"required\"", got)
+	opts := einomodel.GetCommonOptions(&einomodel.Options{}, req.Options...)
+
+	if opts.ToolChoice == nil || *opts.ToolChoice != schema.ToolChoiceForced {
+		t.Fatalf("expected forced tool choice, got %+v", opts.ToolChoice)
+	}
+	if len(opts.Tools) != 2 {
+		t.Fatalf("tools = %d, want all available tools", len(opts.Tools))
 	}
 }
 
-func TestChatCompletionParamsDropsToolChoiceWhenTargetUnavailable(t *testing.T) {
+func TestModelCallDropsToolChoiceWhenTargetUnavailable(t *testing.T) {
 	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
 	runCtx := NewRunContext("run command", RunModeSync)
 	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceSpecific, Name: tool.AgentToolRead})
 
-	params := agent.newChatCompletionParams(runCtx)
+	req, err := agent.newModelCall(runCtx)
+	if err != nil {
+		t.Fatalf("new model call: %v", err)
+	}
+	opts := einomodel.GetCommonOptions(&einomodel.Options{}, req.Options...)
 
-	if params.ToolChoice.OfFunctionToolChoice != nil {
-		t.Fatalf("expected tool choice to be dropped when target unavailable, got %+v", params.ToolChoice.OfFunctionToolChoice)
+	if opts.ToolChoice != nil {
+		t.Fatalf("expected tool choice to be dropped when target unavailable, got %+v", opts.ToolChoice)
 	}
 }
 
-func TestChatCompletionParamsDropsToolChoiceWhenTargetDisabled(t *testing.T) {
+func TestModelCallDropsToolChoiceWhenTargetDisabled(t *testing.T) {
 	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
 	runCtx := NewRunContext("run command", RunModeSync)
 	runCtx.DisableTool(tool.AgentToolBash, "shell disabled")
 	runCtx.SetToolChoice(ToolChoice{Mode: ToolChoiceSpecific, Name: tool.AgentToolBash})
 
-	params := agent.newChatCompletionParams(runCtx)
+	req, err := agent.newModelCall(runCtx)
+	if err != nil {
+		t.Fatalf("new model call: %v", err)
+	}
+	opts := einomodel.GetCommonOptions(&einomodel.Options{}, req.Options...)
 
-	if params.ToolChoice.OfFunctionToolChoice != nil {
-		t.Fatalf("expected tool choice to be dropped when target disabled, got %+v", params.ToolChoice.OfFunctionToolChoice)
+	if opts.ToolChoice != nil {
+		t.Fatalf("expected tool choice to be dropped when target disabled, got %+v", opts.ToolChoice)
 	}
 }
 
@@ -121,10 +147,13 @@ func TestRuntimeContextDoesNotAddSecondSystemMessage(t *testing.T) {
 	runCtx := NewRunContext("next", RunModeSync)
 	runCtx.SetContextBlock("memory", "Memory", "User prefers concise replies.")
 
-	params := agent.newChatCompletionParams(runCtx)
+	req, err := agent.newModelCall(runCtx)
 
-	if len(params.Messages) != len(agent.messages) {
-		t.Fatalf("messages = %d, want %d; runtime context should be merged into first system message", len(params.Messages), len(agent.messages))
+	if err != nil {
+		t.Fatalf("new model call: %v", err)
+	}
+	if len(req.Messages) != len(agent.messages) {
+		t.Fatalf("messages = %d, want %d; runtime context should be merged into first system message", len(req.Messages), len(agent.messages))
 	}
 }
 
@@ -193,8 +222,8 @@ func (finalizeHook) FinalizeRun(_ context.Context, _ *RunContext, result *AgentR
 	return nil
 }
 
-func testModelConfig() shared.ModelConfig {
-	return shared.ModelConfig{
+func testModelConfig() config.ModelConfig {
+	return config.ModelConfig{
 		BaseURL: "http://example.test/v1",
 		ApiKey:  "test-key",
 		Model:   "test-model",

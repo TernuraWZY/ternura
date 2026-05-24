@@ -64,7 +64,7 @@ func (j Job) legacyStatus() string {
 }
 
 type legacyScheduleFile struct {
-	Version int              `json:"version"`
+	Version int                  `json:"version"`
 	Tasks   []legacyScheduleTask `json:"tasks,omitempty"`
 }
 

@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"ternura"
+	"ternura/agent"
 	"ternura/tool"
 )
 
@@ -21,7 +21,7 @@ func (h *currentTimeHook) HookName() string {
 	return "current_time"
 }
 
-func (h *currentTimeHook) BeforeModelCall(_ context.Context, run *ternura.RunContext) error {
+func (h *currentTimeHook) BeforeModelCall(_ context.Context, run *agent.RunContext) error {
 	if run == nil {
 		return nil
 	}
@@ -53,7 +53,7 @@ func (h *scheduleGuidanceHook) HookName() string {
 	return "schedule_guidance"
 }
 
-func (h *scheduleGuidanceHook) BeforeModelCall(_ context.Context, run *ternura.RunContext) error {
+func (h *scheduleGuidanceHook) BeforeModelCall(_ context.Context, run *agent.RunContext) error {
 	if run == nil {
 		return nil
 	}
@@ -86,13 +86,13 @@ func (h *scheduleGuidanceHook) BeforeModelCall(_ context.Context, run *ternura.R
 	if run.ModelCallCount == 1 {
 		switch {
 		case isCancel && cronJobIDPattern.MatchString(query):
-			run.SetToolChoice(ternura.ToolChoice{
-				Mode: ternura.ToolChoiceSpecific,
+			run.SetToolChoice(agent.ToolChoice{
+				Mode: agent.ToolChoiceSpecific,
 				Name: tool.AgentToolCron,
 			})
 		case isStrong:
-			run.SetToolChoice(ternura.ToolChoice{
-				Mode: ternura.ToolChoiceSpecific,
+			run.SetToolChoice(agent.ToolChoice{
+				Mode: agent.ToolChoiceSpecific,
 				Name: tool.AgentToolCron,
 			})
 		}

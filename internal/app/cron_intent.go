@@ -1,15 +1,15 @@
-package main
+package app
 
 import (
 	"regexp"
 	"strconv"
 	"strings"
 
-	"ternura/main/cron"
+	"ternura/internal/cron"
 )
 
 var (
-	vagueTimePattern = regexp.MustCompile(`(?i)(等下|等一会|等会儿?|稍后|一会儿?|待会儿?|回头|到时候|later|soon)`)
+	vagueTimePattern    = regexp.MustCompile(`(?i)(等下|等一会|等会儿?|稍后|一会儿?|待会儿?|回头|到时候|later|soon)`)
 	concreteTimePattern = regexp.MustCompile(
 		`(?i)(\d+\s*(秒钟|秒|seconds?|secs?|分钟|分|min(?:ute)?s?|小时|钟头|hours?|hrs?|天|days?))` +
 			`|(\d{1,2}\s*[:点时]\s*\d{0,2})` +

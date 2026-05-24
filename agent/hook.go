@@ -1,4 +1,4 @@
-package ternura
+package agent
 
 import (
 	"context"

@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"ternura"
+	"ternura/agent"
 	"ternura/tool"
 )
 
@@ -218,7 +218,7 @@ func (m *memoryStore) RuntimeContext(sessionID string) (string, error) {
 	return strings.Join(sections, "\n"), nil
 }
 
-func (m *memoryStore) AppendShortTermTurn(sessionID string, userMessage string, result ternura.AgentRunResult) error {
+func (m *memoryStore) AppendShortTermTurn(sessionID string, userMessage string, result agent.AgentRunResult) error {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return nil

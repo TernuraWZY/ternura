@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"ternura"
-	"ternura/main/cron"
+	"ternura/agent"
+	"ternura/internal/cron"
 	"ternura/tool"
 )
 
@@ -26,7 +26,7 @@ func (h *stateGuardHook) HookName() string {
 	return "state_guard"
 }
 
-func (h *stateGuardHook) FinalizeRun(_ context.Context, run *ternura.RunContext, result *ternura.AgentRunResult) error {
+func (h *stateGuardHook) FinalizeRun(_ context.Context, run *agent.RunContext, result *agent.AgentRunResult) error {
 	if result == nil || run == nil || strings.TrimSpace(result.Content) == "" {
 		return nil
 	}
@@ -40,7 +40,7 @@ func (h *stateGuardHook) FinalizeRun(_ context.Context, run *ternura.RunContext,
 	if result.RawContent == "" {
 		result.RawContent = original
 	}
-	result.Trace = append(result.Trace, ternura.AgentTraceItem{
+	result.Trace = append(result.Trace, agent.AgentTraceItem{
 		Type:    "guard",
 		Title:   "Harness guard",
 		Content: decision.TraceContent(),
@@ -56,7 +56,7 @@ type scheduleGroundingDecision struct {
 	SuccessfulTools []string
 }
 
-func (h *stateGuardHook) checkScheduleGrounding(run *ternura.RunContext, result *ternura.AgentRunResult) scheduleGroundingDecision {
+func (h *stateGuardHook) checkScheduleGrounding(run *agent.RunContext, result *agent.AgentRunResult) scheduleGroundingDecision {
 	content := strings.TrimSpace(result.Content)
 	claimedIDs := uniqueStrings(cronJobIDPattern.FindAllString(content, -1))
 	successfulTools := h.successfulCronToolIDs(run, result)
@@ -99,7 +99,7 @@ func (h *stateGuardHook) checkScheduleGrounding(run *ternura.RunContext, result 
 	}
 }
 
-func (h *stateGuardHook) successfulCronToolIDs(run *ternura.RunContext, result *ternura.AgentRunResult) []string {
+func (h *stateGuardHook) successfulCronToolIDs(run *agent.RunContext, result *agent.AgentRunResult) []string {
 	ids := make([]string, 0)
 	if run != nil {
 		for _, item := range run.ToolResults() {

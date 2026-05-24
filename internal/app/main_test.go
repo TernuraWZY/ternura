@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"encoding/json"
@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"ternura"
+	"ternura/agent"
 )
 
 func TestChunkStringByRunesKeepsUTF8Boundaries(t *testing.T) {
@@ -84,10 +84,10 @@ func TestSessionStorePersistsRunsAndConversation(t *testing.T) {
 	if err := store.StartRun(run, "hello"); err != nil {
 		t.Fatalf("start run: %v", err)
 	}
-	if err := store.FinishRun(run, "hello", ternura.AgentRunResult{
+	if err := store.FinishRun(run, "hello", agent.AgentRunResult{
 		Content:    "hi",
 		RawContent: "<think>ok</think>hi",
-		Trace: []ternura.AgentTraceItem{{
+		Trace: []agent.AgentTraceItem{{
 			Type:    "think",
 			Title:   "Thinking",
 			Content: "ok",

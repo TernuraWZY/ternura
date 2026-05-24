@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ternura/main/cron"
+	"ternura/internal/cron"
 )
 
 func TestServiceAddRemoveAndReload(t *testing.T) {

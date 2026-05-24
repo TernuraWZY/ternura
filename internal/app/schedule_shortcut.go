@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -6,27 +6,27 @@ import (
 	"fmt"
 	"time"
 
-	"ternura"
-	"ternura/main/cron"
+	"ternura/agent"
+	"ternura/internal/cron"
 	"ternura/tool"
 )
 
 // tryScheduleShortcut 对「N分钟后提醒我X」这类明确句式直接创建 cron，不依赖 LLM。
-func (s *agentServer) tryScheduleShortcut(ctx context.Context, message string) (ternura.AgentRunResult, bool, error) {
+func (s *agentServer) tryScheduleShortcut(ctx context.Context, message string) (agent.AgentRunResult, bool, error) {
 	return s.tryScheduleShortcutForSession(ctx, message, s.store.CurrentSessionID(), nil)
 }
 
-func (s *agentServer) tryScheduleShortcutForSession(ctx context.Context, message string, sessionID string, delivery *cron.DeliveryTarget) (ternura.AgentRunResult, bool, error) {
+func (s *agentServer) tryScheduleShortcutForSession(ctx context.Context, message string, sessionID string, delivery *cron.DeliveryTarget) (agent.AgentRunResult, bool, error) {
 	params, ok := parseRelativeScheduleShortcut(message)
 	if !ok {
-		return ternura.AgentRunResult{}, false, nil
+		return agent.AgentRunResult{}, false, nil
 	}
 	params.SessionID = sessionID
 	params.Delivery = delivery
 	job, err := s.cron.Add(ctx, params)
 	if err != nil {
 		content := fmt.Sprintf("我识别到你想设置定时任务，但参数有问题（%s）。能再具体说一下时间吗？", err.Error())
-		return ternura.AgentRunResult{Content: content, RawContent: content}, true, nil
+		return agent.AgentRunResult{Content: content, RawContent: content}, true, nil
 	}
 	s.wakeCronRunner()
 	delayLabel := cronDelayLabel(job.State.NextRunAtMS)
@@ -37,10 +37,10 @@ func (s *agentServer) tryScheduleShortcutForSession(ctx context.Context, message
 		"delay_seconds": params.DelaySeconds,
 	}, "", "  ")
 	traceContent := fmt.Sprintf("**Arguments**\n\n```json\n%s\n```\n\n**Result**\n\n```text\nCreated job '%s' (id: %s)\n```", args, job.Name, job.ID)
-	return ternura.AgentRunResult{
+	return agent.AgentRunResult{
 		Content:    content,
 		RawContent: content,
-		Trace: []ternura.AgentTraceItem{{
+		Trace: []agent.AgentTraceItem{{
 			Type:    "tool",
 			Title:   "Tool use: " + string(tool.AgentToolCron),
 			Content: traceContent,
@@ -68,23 +68,23 @@ func cronDelayLabel(nextRunMS int64) string {
 	}
 }
 
-func emitScheduleShortcutResult(emit func(ternura.AgentStreamEvent) error, result ternura.AgentRunResult) error {
+func emitScheduleShortcutResult(emit func(agent.AgentStreamEvent) error, result agent.AgentRunResult) error {
 	for idx, item := range result.Trace {
 		id := fmt.Sprintf("trace-shortcut-%d", idx+1)
-		if err := emit(ternura.AgentStreamEvent{Type: "trace_start", ID: id, TraceType: item.Type, Title: item.Title}); err != nil {
+		if err := emit(agent.AgentStreamEvent{Type: "trace_start", ID: id, TraceType: item.Type, Title: item.Title}); err != nil {
 			return err
 		}
 		if item.Content != "" {
-			if err := emit(ternura.AgentStreamEvent{Type: "trace_delta", ID: id, Delta: item.Content}); err != nil {
+			if err := emit(agent.AgentStreamEvent{Type: "trace_delta", ID: id, Delta: item.Content}); err != nil {
 				return err
 			}
 		}
-		if err := emit(ternura.AgentStreamEvent{Type: "trace_done", ID: id, Content: item.Content}); err != nil {
+		if err := emit(agent.AgentStreamEvent{Type: "trace_done", ID: id, Content: item.Content}); err != nil {
 			return err
 		}
 	}
 	if result.Content != "" {
-		return emit(ternura.AgentStreamEvent{Type: "content", Content: result.Content})
+		return emit(agent.AgentStreamEvent{Type: "content", Content: result.Content})
 	}
 	return nil
 }

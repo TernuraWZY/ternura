@@ -1,11 +1,11 @@
-package main
+package app
 
 import (
 	"path/filepath"
 	"testing"
 	"time"
 
-	"ternura"
+	"ternura/agent"
 )
 
 func TestSessionStoreRunForSession(t *testing.T) {
@@ -28,7 +28,7 @@ func TestSessionStoreRunForSession(t *testing.T) {
 	if err := store.StartRunForSession(firstID, run, "scheduled prompt"); err != nil {
 		t.Fatalf("start run for session: %v", err)
 	}
-	if err := store.FinishRunForSession(firstID, run, "scheduled prompt", ternura.AgentRunResult{Content: "done"}, runStatusSucceeded, time.Now(), nil); err != nil {
+	if err := store.FinishRunForSession(firstID, run, "scheduled prompt", agent.AgentRunResult{Content: "done"}, runStatusSucceeded, time.Now(), nil); err != nil {
 		t.Fatalf("finish run for session: %v", err)
 	}
 	updated := store.Snapshot()
@@ -51,7 +51,7 @@ func TestSessionStoreScheduledRunMarksTriggerAndSplitsPrompts(t *testing.T) {
 	if err := store.StartRunForSession(sessionID, userRun, "帮我看下天气"); err != nil {
 		t.Fatalf("start user run: %v", err)
 	}
-	if err := store.FinishRunForSession(sessionID, userRun, "帮我看下天气", ternura.AgentRunResult{Content: "今天晴"}, runStatusSucceeded, time.Now(), nil); err != nil {
+	if err := store.FinishRunForSession(sessionID, userRun, "帮我看下天气", agent.AgentRunResult{Content: "今天晴"}, runStatusSucceeded, time.Now(), nil); err != nil {
 		t.Fatalf("finish user run: %v", err)
 	}
 	preTitleSession := findSession(store.Snapshot().Sessions, sessionID)
@@ -66,7 +66,7 @@ func TestSessionStoreScheduledRunMarksTriggerAndSplitsPrompts(t *testing.T) {
 	if err := store.StartScheduledRunForSession(sessionID, scheduledRun, display); err != nil {
 		t.Fatalf("start scheduled run: %v", err)
 	}
-	if err := store.FinishScheduledRunForSession(sessionID, scheduledRun, display, runtime, ternura.AgentRunResult{Content: "🍽️ 吃饭时间到"}, runStatusSucceeded, time.Now(), nil); err != nil {
+	if err := store.FinishScheduledRunForSession(sessionID, scheduledRun, display, runtime, agent.AgentRunResult{Content: "🍽️ 吃饭时间到"}, runStatusSucceeded, time.Now(), nil); err != nil {
 		t.Fatalf("finish scheduled run: %v", err)
 	}
 

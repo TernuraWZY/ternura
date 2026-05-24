@@ -1,10 +1,10 @@
-package main
+package app
 
 import (
 	"context"
 	"log"
 
-	"ternura"
+	"ternura/agent"
 )
 
 type memoryHook struct {
@@ -23,7 +23,7 @@ func (h *memoryHook) HookName() string {
 	return "memory"
 }
 
-func (h *memoryHook) BeforeModelCall(ctx context.Context, run *ternura.RunContext) error {
+func (h *memoryHook) BeforeModelCall(ctx context.Context, run *agent.RunContext) error {
 	if h == nil || h.store == nil || run == nil {
 		return nil
 	}
@@ -36,7 +36,7 @@ func (h *memoryHook) BeforeModelCall(ctx context.Context, run *ternura.RunContex
 	return nil
 }
 
-func (h *memoryHook) AfterRun(ctx context.Context, run *ternura.RunContext, result ternura.AgentRunResult, runErr error) error {
+func (h *memoryHook) AfterRun(ctx context.Context, run *agent.RunContext, result agent.AgentRunResult, runErr error) error {
 	if h == nil || h.store == nil || run == nil || runErr != nil || result.Content == "" {
 		return nil
 	}

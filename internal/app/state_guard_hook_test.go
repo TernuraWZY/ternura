@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -6,13 +6,13 @@ import (
 	"strings"
 	"testing"
 
-	"ternura"
-	"ternura/main/cron"
+	"ternura/agent"
+	"ternura/internal/cron"
 )
 
 func TestStateGuardBlocksUngroundedScheduleIDClaim(t *testing.T) {
-	run := ternura.NewRunContext("1分钟后提醒我睡觉", ternura.RunModeSync)
-	result := ternura.AgentRunResult{
+	run := agent.NewRunContext("1分钟后提醒我睡觉", agent.RunModeSync)
+	result := agent.AgentRunResult{
 		Content: "好的，1分钟后我会提醒你该睡觉了。\n\n（任务 ID：`schedule-20260520T163400`）",
 	}
 
@@ -30,8 +30,8 @@ func TestStateGuardBlocksUngroundedScheduleIDClaim(t *testing.T) {
 }
 
 func TestStateGuardBlocksUngroundedScheduleSuccessWithoutID(t *testing.T) {
-	run := ternura.NewRunContext("设置1分钟后提醒我睡觉", ternura.RunModeSync)
-	result := ternura.AgentRunResult{
+	run := agent.NewRunContext("设置1分钟后提醒我睡觉", agent.RunModeSync)
+	result := agent.AgentRunResult{
 		Content: "好的，已设置1分钟后的睡觉提醒。",
 	}
 
@@ -46,8 +46,8 @@ func TestStateGuardBlocksUngroundedScheduleSuccessWithoutID(t *testing.T) {
 }
 
 func TestStateGuardAllowsVagueScheduleClarification(t *testing.T) {
-	run := ternura.NewRunContext("等一会告诉我天气", ternura.RunModeSync)
-	result := ternura.AgentRunResult{
+	run := agent.NewRunContext("等一会告诉我天气", agent.RunModeSync)
+	result := agent.AgentRunResult{
 		Content: "好的！你想让我多久后告诉你天气？比如 2 分钟后或 5 分钟后？",
 	}
 
@@ -73,9 +73,9 @@ func TestStateGuardAllowsKnownScheduleID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create cron job: %v", err)
 	}
-	run := ternura.NewRunContext("设置1分钟后提醒我睡觉", ternura.RunModeSync)
+	run := agent.NewRunContext("设置1分钟后提醒我睡觉", agent.RunModeSync)
 	content := fmt.Sprintf("好的，已设置1分钟后的睡觉提醒。\n\n任务 ID：`%s`", job.ID)
-	result := ternura.AgentRunResult{Content: content}
+	result := agent.AgentRunResult{Content: content}
 
 	err = newStateGuardHook(svc).FinalizeRun(context.Background(), run, &result)
 
@@ -88,9 +88,9 @@ func TestStateGuardAllowsKnownScheduleID(t *testing.T) {
 }
 
 func TestStateGuardAllowsDiagnosticScheduleMention(t *testing.T) {
-	run := ternura.NewRunContext("schedule-20260520T163400 这个为啥定时任务又没了", ternura.RunModeSync)
+	run := agent.NewRunContext("schedule-20260520T163400 这个为啥定时任务又没了", agent.RunModeSync)
 	content := "这个 `schedule-20260520T163400` 不在真实的定时任务存储里。"
-	result := ternura.AgentRunResult{Content: content}
+	result := agent.AgentRunResult{Content: content}
 
 	err := newStateGuardHook(nil).FinalizeRun(context.Background(), run, &result)
 
@@ -103,9 +103,9 @@ func TestStateGuardAllowsDiagnosticScheduleMention(t *testing.T) {
 }
 
 func TestStateGuardAllowsEnglishDiagnosticScheduleMention(t *testing.T) {
-	run := ternura.NewRunContext("why did schedule-20260520T163400 disappear?", ternura.RunModeSync)
+	run := agent.NewRunContext("why did schedule-20260520T163400 disappear?", agent.RunModeSync)
 	content := "The scheduled task `schedule-20260520T163400` does not exist in the store."
-	result := ternura.AgentRunResult{Content: content}
+	result := agent.AgentRunResult{Content: content}
 
 	err := newStateGuardHook(nil).FinalizeRun(context.Background(), run, &result)
 

@@ -1,11 +1,11 @@
-package main
+package app
 
 import (
 	"context"
 	"strings"
 	"testing"
 
-	"ternura"
+	"ternura/agent"
 	"ternura/tool"
 )
 
@@ -87,7 +87,7 @@ func TestMemoryStoreShortTermMemoryRollsBySession(t *testing.T) {
 	store.shortTermTurnLimit = 2
 
 	for _, message := range []string{"first", "second", "third"} {
-		if err := store.AppendShortTermTurn("session-test", message, ternura.AgentRunResult{Content: "answer " + message}); err != nil {
+		if err := store.AppendShortTermTurn("session-test", message, agent.AgentRunResult{Content: "answer " + message}); err != nil {
 			t.Fatalf("append short-term turn: %v", err)
 		}
 	}

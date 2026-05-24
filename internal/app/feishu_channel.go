@@ -1,13 +1,13 @@
-package main
+package app
 
 import (
 	"context"
 	"log"
 	"time"
 
-	"ternura"
-	"ternura/main/cron"
-	"ternura/main/feishu"
+	"ternura/agent"
+	"ternura/internal/cron"
+	"ternura/internal/feishu"
 	"ternura/tool"
 )
 
@@ -42,7 +42,7 @@ func (s *agentServer) handleFeishuMessage(ctx context.Context, msg feishu.Inboun
 	return s.finishFeishuRun(sessionID, run, msg.Content, result, err)
 }
 
-func (s *agentServer) finishFeishuRun(sessionID string, run runLifecycle, message string, result ternura.AgentRunResult, runErr error) (string, error) {
+func (s *agentServer) finishFeishuRun(sessionID string, run runLifecycle, message string, result agent.AgentRunResult, runErr error) (string, error) {
 	finished := time.Now()
 	status := runStatusSucceeded
 	if runErr != nil {
@@ -71,7 +71,7 @@ func feishuDeliveryTarget(msg feishu.InboundMessage) *cron.DeliveryTarget {
 	}
 }
 
-func (s *agentServer) deliverCronResult(ctx context.Context, job cron.Job, result ternura.AgentRunResult) {
+func (s *agentServer) deliverCronResult(ctx context.Context, job cron.Job, result agent.AgentRunResult) {
 	if job.Payload.Delivery == nil || result.Content == "" {
 		return
 	}

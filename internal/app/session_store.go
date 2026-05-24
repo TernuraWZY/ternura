@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"encoding/json"
@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"ternura"
+	"ternura/agent"
 )
 
 const (
@@ -41,17 +41,17 @@ const (
 )
 
 type persistedRun struct {
-	RunID       string                   `json:"run_id"`
-	Status      string                   `json:"status"`
-	UserMessage string                   `json:"user_message"`
-	TriggerKind string                   `json:"trigger_kind,omitempty"`
-	Content     string                   `json:"content,omitempty"`
-	Trace       []ternura.AgentTraceItem `json:"trace,omitempty"`
-	RawContent  string                   `json:"raw_content,omitempty"`
-	Error       string                   `json:"error,omitempty"`
-	StartedAt   string                   `json:"started_at,omitempty"`
-	FinishedAt  string                   `json:"finished_at,omitempty"`
-	DurationMS  int64                    `json:"duration_ms,omitempty"`
+	RunID       string                 `json:"run_id"`
+	Status      string                 `json:"status"`
+	UserMessage string                 `json:"user_message"`
+	TriggerKind string                 `json:"trigger_kind,omitempty"`
+	Content     string                 `json:"content,omitempty"`
+	Trace       []agent.AgentTraceItem `json:"trace,omitempty"`
+	RawContent  string                 `json:"raw_content,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	StartedAt   string                 `json:"started_at,omitempty"`
+	FinishedAt  string                 `json:"finished_at,omitempty"`
+	DurationMS  int64                  `json:"duration_ms,omitempty"`
 }
 
 type persistedTodo struct {
@@ -242,11 +242,11 @@ func (s *sessionStore) startRunLocked(sessionID string, run runLifecycle, displa
 	return s.saveLocked()
 }
 
-func (s *sessionStore) FinishRun(run runLifecycle, userMessage string, result ternura.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
+func (s *sessionStore) FinishRun(run runLifecycle, userMessage string, result agent.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
 	return s.FinishRunForSession("", run, userMessage, result, status, finishedAt, runErr)
 }
 
-func (s *sessionStore) FinishRunForSession(sessionID string, run runLifecycle, userMessage string, result ternura.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
+func (s *sessionStore) FinishRunForSession(sessionID string, run runLifecycle, userMessage string, result agent.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
 	return s.finishRunLocked(sessionID, run, userMessage, userMessage, runTriggerKindUser, result, status, finishedAt, runErr)
 }
 
@@ -254,11 +254,11 @@ func (s *sessionStore) FinishRunForSession(sessionID string, run runLifecycle, u
 //   - displayPrompt 写入 run.UserMessage，让前端展示自然语言的提醒文本；
 //   - runtimePrompt 才是真正塞进 LLM messages 历史的 user 内容（一般是带 "[cron job fired]" 前缀的包装版本），
 //     这样后续轮次模型能清楚分辨"用户原话"和"系统触发的指令"。
-func (s *sessionStore) FinishScheduledRunForSession(sessionID string, run runLifecycle, displayPrompt string, runtimePrompt string, result ternura.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
+func (s *sessionStore) FinishScheduledRunForSession(sessionID string, run runLifecycle, displayPrompt string, runtimePrompt string, result agent.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
 	return s.finishRunLocked(sessionID, run, displayPrompt, runtimePrompt, runTriggerKindSchedule, result, status, finishedAt, runErr)
 }
 
-func (s *sessionStore) finishRunLocked(sessionID string, run runLifecycle, displayMessage string, runtimeMessage string, triggerKind string, result ternura.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
+func (s *sessionStore) finishRunLocked(sessionID string, run runLifecycle, displayMessage string, runtimeMessage string, triggerKind string, result agent.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -994,7 +994,7 @@ func cloneRuns(runs []persistedRun) []persistedRun {
 	cloned := make([]persistedRun, len(runs))
 	for idx, run := range runs {
 		cloned[idx] = run
-		cloned[idx].Trace = append([]ternura.AgentTraceItem(nil), run.Trace...)
+		cloned[idx].Trace = append([]agent.AgentTraceItem(nil), run.Trace...)
 	}
 	return cloned
 }

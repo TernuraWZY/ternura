@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -15,14 +15,14 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"ternura"
-	"ternura/main/cron"
-	"ternura/main/feishu"
-	"ternura/shared"
+	"ternura/agent"
+	"ternura/config"
+	"ternura/internal/cron"
+	"ternura/internal/feishu"
 	"ternura/tool"
 )
 
-func main() {
+func Run() {
 	_ = godotenv.Load()
 
 	query := flag.String("q", "hello", "prompt text")
@@ -33,7 +33,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	modelConf := shared.NewModelConfig()
+	modelConf := config.NewModelConfig()
 
 	if *serve {
 		server := newAgentServer(modelConf)
@@ -48,8 +48,8 @@ func main() {
 		return
 	}
 
-	agent := ternura.NewAgent(modelConf, ternura.TernuraAgentSystemPrompt, newAgentTools(nil, nil, nil, tool.NewCronTool(nil, nil, nil)))
-	result, err := agent.RunWithTrace(ctx, *query)
+	cliAgent := agent.NewAgent(modelConf, agent.TernuraAgentSystemPrompt, newAgentTools(nil, nil, nil, tool.NewCronTool(nil, nil, nil)))
+	result, err := cliAgent.RunWithTrace(ctx, *query)
 	if err != nil {
 		log.Printf("agent run error: %v", err)
 		return
@@ -62,9 +62,9 @@ func main() {
 }
 
 type agentServer struct {
-	modelConf shared.ModelConfig
+	modelConf config.ModelConfig
 	mu        sync.Mutex
-	agent     *ternura.Agent
+	agent     *agent.Agent
 	store     *sessionStore
 	memory    *memoryStore
 	cron      *cron.Service
@@ -99,18 +99,18 @@ type memoryDeleteRequest struct {
 }
 
 type chatResponse struct {
-	Content    string                   `json:"content,omitempty"`
-	Trace      []ternura.AgentTraceItem `json:"trace,omitempty"`
-	RawContent string                   `json:"raw_content,omitempty"`
-	RunID      string                   `json:"run_id,omitempty"`
-	Status     string                   `json:"status,omitempty"`
-	StartedAt  string                   `json:"started_at,omitempty"`
-	FinishedAt string                   `json:"finished_at,omitempty"`
-	DurationMS int64                    `json:"duration_ms,omitempty"`
-	Error      string                   `json:"error,omitempty"`
+	Content    string                 `json:"content,omitempty"`
+	Trace      []agent.AgentTraceItem `json:"trace,omitempty"`
+	RawContent string                 `json:"raw_content,omitempty"`
+	RunID      string                 `json:"run_id,omitempty"`
+	Status     string                 `json:"status,omitempty"`
+	StartedAt  string                 `json:"started_at,omitempty"`
+	FinishedAt string                 `json:"finished_at,omitempty"`
+	DurationMS int64                  `json:"duration_ms,omitempty"`
+	Error      string                 `json:"error,omitempty"`
 }
 
-func newAgentServer(modelConf shared.ModelConfig) *agentServer {
+func newAgentServer(modelConf config.ModelConfig) *agentServer {
 	s := &agentServer{
 		modelConf: modelConf,
 		store:     newSessionStore(defaultSessionPath),
@@ -182,7 +182,7 @@ func (s *agentServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			status = runStatusFailed
 			httpStatus = http.StatusBadGateway
-			result = ternura.AgentRunResult{Content: err.Error()}
+			result = agent.AgentRunResult{Content: err.Error()}
 		}
 		logRunFinish(run, status, finished)
 		if persistErr := s.store.FinishRun(run, req.Message, result, status, finished, err); persistErr != nil {
@@ -263,7 +263,7 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		_ = streamer.Close()
 	}()
-	emit := func(event ternura.AgentStreamEvent) error {
+	emit := func(event agent.AgentStreamEvent) error {
 		event.RunID = run.ID
 		return streamer.Emit(event)
 	}
@@ -271,7 +271,7 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	if err := emit(run.startEvent()); err != nil {
 		return
 	}
-	if err := emit(ternura.AgentStreamEvent{
+	if err := emit(agent.AgentStreamEvent{
 		Type:      eventTypeStart,
 		Status:    runStatusRunning,
 		StartedAt: run.StartedAt.Format(time.RFC3339Nano),
@@ -286,7 +286,7 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			status = runStatusFailed
 			eventType = eventTypeRunFailed
-			result = ternura.AgentRunResult{Content: err.Error(), RawContent: err.Error()}
+			result = agent.AgentRunResult{Content: err.Error(), RawContent: err.Error()}
 		} else if emitErr := emitScheduleShortcutResult(emit, result); emitErr != nil {
 			return
 		}
@@ -296,7 +296,7 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = emit(run.finishEvent(eventType, status, finished, err))
 		if err != nil {
-			_ = emit(ternura.AgentStreamEvent{Type: eventTypeError, Error: err.Error()})
+			_ = emit(agent.AgentStreamEvent{Type: eventTypeError, Error: err.Error()})
 		}
 		return
 	}
@@ -316,7 +316,7 @@ func (s *agentServer) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = emit(run.finishEvent(eventType, status, finished, err))
 		if status == runStatusFailed {
-			_ = emit(ternura.AgentStreamEvent{
+			_ = emit(agent.AgentStreamEvent{
 				Type:  eventTypeError,
 				Error: err.Error(),
 			})
@@ -370,8 +370,8 @@ func newRunLifecycle() runLifecycle {
 	}
 }
 
-func (r runLifecycle) startEvent() ternura.AgentStreamEvent {
-	return ternura.AgentStreamEvent{
+func (r runLifecycle) startEvent() agent.AgentStreamEvent {
+	return agent.AgentStreamEvent{
 		Type:      eventTypeRunStart,
 		RunID:     r.ID,
 		Status:    runStatusRunning,
@@ -379,8 +379,8 @@ func (r runLifecycle) startEvent() ternura.AgentStreamEvent {
 	}
 }
 
-func (r runLifecycle) finishEvent(eventType string, status string, finishedAt time.Time, runErr error) ternura.AgentStreamEvent {
-	event := ternura.AgentStreamEvent{
+func (r runLifecycle) finishEvent(eventType string, status string, finishedAt time.Time, runErr error) agent.AgentStreamEvent {
+	event := agent.AgentStreamEvent{
 		Type:       eventType,
 		RunID:      r.ID,
 		Status:     status,
@@ -424,7 +424,7 @@ type smoothStreamWriter struct {
 	flusher        http.Flusher
 	chunkRunes     int
 	interval       time.Duration
-	events         chan ternura.AgentStreamEvent
+	events         chan agent.AgentStreamEvent
 	done           chan struct{}
 	closeOnce      sync.Once
 	errMu          sync.Mutex
@@ -450,7 +450,7 @@ func newSmoothStreamWriter(ctx context.Context, w http.ResponseWriter, flusher h
 		flusher:    flusher,
 		chunkRunes: chunkRunes,
 		interval:   time.Duration(intervalMS) * time.Millisecond,
-		events:     make(chan ternura.AgentStreamEvent, 128),
+		events:     make(chan agent.AgentStreamEvent, 128),
 		done:       make(chan struct{}),
 		traceTypes: make(map[string]string),
 	}
@@ -458,7 +458,7 @@ func newSmoothStreamWriter(ctx context.Context, w http.ResponseWriter, flusher h
 	return streamer
 }
 
-func (s *smoothStreamWriter) Emit(event ternura.AgentStreamEvent) error {
+func (s *smoothStreamWriter) Emit(event agent.AgentStreamEvent) error {
 	select {
 	case <-s.ctx.Done():
 		return s.ctx.Err()
@@ -487,7 +487,7 @@ func (s *smoothStreamWriter) run() {
 	}
 }
 
-func (s *smoothStreamWriter) writeEvent(event ternura.AgentStreamEvent) error {
+func (s *smoothStreamWriter) writeEvent(event agent.AgentStreamEvent) error {
 	switch event.Type {
 	case eventTypeContentDelta:
 		return s.emitDelta(event, true)
@@ -516,7 +516,7 @@ func (s *smoothStreamWriter) getErr() error {
 	return s.err
 }
 
-func (s *smoothStreamWriter) emitDelta(event ternura.AgentStreamEvent, smooth bool) error {
+func (s *smoothStreamWriter) emitDelta(event agent.AgentStreamEvent, smooth bool) error {
 	if event.Delta == "" {
 		return nil
 	}
@@ -781,11 +781,11 @@ func (s *agentServer) handleReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *agentServer) resetAgent() {
-	s.agent = ternura.NewAgent(
+	s.agent = agent.NewAgent(
 		s.modelConf,
-		ternura.TernuraAgentSystemPrompt,
+		agent.TernuraAgentSystemPrompt,
 		newAgentTools(s.updateTodos, s.rememberMemory, s.forgetMemory, s.cronTool),
-		ternura.WithHooks(
+		agent.WithHooks(
 			newCurrentTimeHook(),
 			newMemoryHook(s.memory, s.store.CurrentSessionID),
 			newScheduleGuidanceHook(),
@@ -808,15 +808,15 @@ func (s *agentServer) resetAgentFromSnapshot(snapshot sessionSnapshot) {
 	log.Printf("restored %d persisted conversation messages from %s", len(session.Messages), session.SessionID)
 }
 
-func restoreAgentConversation(agent *ternura.Agent, persisted []persistedMessage) {
-	messages := make([]ternura.ConversationMessage, 0, len(persisted))
+func restoreAgentConversation(agentInstance *agent.Agent, persisted []persistedMessage) {
+	messages := make([]agent.ConversationMessage, 0, len(persisted))
 	for _, message := range persisted {
-		messages = append(messages, ternura.ConversationMessage{
+		messages = append(messages, agent.ConversationMessage{
 			Role:    message.Role,
 			Content: message.Content,
 		})
 	}
-	agent.RestoreConversation(messages)
+	agentInstance.RestoreConversation(messages)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value chatResponse) {
@@ -867,7 +867,7 @@ func writeSchedulesJSON(w http.ResponseWriter, status int, value schedulesRespon
 	}
 }
 
-func writeSSE(w http.ResponseWriter, flusher http.Flusher, event ternura.AgentStreamEvent) error {
+func writeSSE(w http.ResponseWriter, flusher http.Flusher, event agent.AgentStreamEvent) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return err

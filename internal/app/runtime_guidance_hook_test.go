@@ -1,16 +1,16 @@
-package main
+package app
 
 import (
 	"context"
 	"strings"
 	"testing"
 
-	"ternura"
+	"ternura/agent"
 	"ternura/tool"
 )
 
 func TestCurrentTimeHookAddsRuntimeContext(t *testing.T) {
-	run := ternura.NewRunContext("hello", ternura.RunModeSync)
+	run := agent.NewRunContext("hello", agent.RunModeSync)
 
 	if err := newCurrentTimeHook().BeforeModelCall(context.Background(), run); err != nil {
 		t.Fatalf("before model call: %v", err)
@@ -25,7 +25,7 @@ func TestCurrentTimeHookAddsRuntimeContext(t *testing.T) {
 }
 
 func TestCurrentTimeHookMarksCronRuntimeAsDueNow(t *testing.T) {
-	run := ternura.NewRunContext(wrapCronRuntimePrompt("提醒用户：喝水"), ternura.RunModeSync)
+	run := agent.NewRunContext(wrapCronRuntimePrompt("提醒用户：喝水"), agent.RunModeSync)
 
 	if err := newCurrentTimeHook().BeforeModelCall(context.Background(), run); err != nil {
 		t.Fatalf("before model call: %v", err)
@@ -43,7 +43,7 @@ func TestCurrentTimeHookMarksCronRuntimeAsDueNow(t *testing.T) {
 }
 
 func TestScheduleGuidanceHookAddsReminderGuidance(t *testing.T) {
-	run := ternura.NewRunContext("2分钟后提醒我喝水", ternura.RunModeSync)
+	run := agent.NewRunContext("2分钟后提醒我喝水", agent.RunModeSync)
 
 	if err := newScheduleGuidanceHook().BeforeModelCall(context.Background(), run); err != nil {
 		t.Fatalf("before model call: %v", err)
@@ -58,7 +58,7 @@ func TestScheduleGuidanceHookAddsReminderGuidance(t *testing.T) {
 }
 
 func TestScheduleGuidanceHookTreatsCronRuntimeAsExecution(t *testing.T) {
-	run := ternura.NewRunContext(wrapCronRuntimePrompt("提醒用户：喝水"), ternura.RunModeSync)
+	run := agent.NewRunContext(wrapCronRuntimePrompt("提醒用户：喝水"), agent.RunModeSync)
 	run.ModelCallCount = 1
 
 	if err := newScheduleGuidanceHook().BeforeModelCall(context.Background(), run); err != nil {
@@ -80,7 +80,7 @@ func TestScheduleGuidanceHookTreatsCronRuntimeAsExecution(t *testing.T) {
 }
 
 func TestScheduleGuidanceHookAddsCancelGuidance(t *testing.T) {
-	run := ternura.NewRunContext("取消 schedule-20260520T120000 这个提醒", ternura.RunModeSync)
+	run := agent.NewRunContext("取消 schedule-20260520T120000 这个提醒", agent.RunModeSync)
 
 	if err := newScheduleGuidanceHook().BeforeModelCall(context.Background(), run); err != nil {
 		t.Fatalf("before model call: %v", err)
@@ -98,7 +98,7 @@ func TestScheduleGuidanceHookAddsCancelGuidance(t *testing.T) {
 }
 
 func TestScheduleGuidanceHookIgnoresOrdinaryFutureQuestion(t *testing.T) {
-	run := ternura.NewRunContext("明天天气怎么样", ternura.RunModeSync)
+	run := agent.NewRunContext("明天天气怎么样", agent.RunModeSync)
 
 	if err := newScheduleGuidanceHook().BeforeModelCall(context.Background(), run); err != nil {
 		t.Fatalf("before model call: %v", err)
@@ -110,7 +110,7 @@ func TestScheduleGuidanceHookIgnoresOrdinaryFutureQuestion(t *testing.T) {
 }
 
 func TestScheduleGuidanceHookForcesScheduleToolOnStrongIntent(t *testing.T) {
-	run := ternura.NewRunContext("2分钟后提醒我喝水", ternura.RunModeSync)
+	run := agent.NewRunContext("2分钟后提醒我喝水", agent.RunModeSync)
 	run.ModelCallCount = 1
 
 	if err := newScheduleGuidanceHook().BeforeModelCall(context.Background(), run); err != nil {
@@ -118,13 +118,13 @@ func TestScheduleGuidanceHookForcesScheduleToolOnStrongIntent(t *testing.T) {
 	}
 
 	choice := run.RequestedToolChoice()
-	if choice.Mode != ternura.ToolChoiceSpecific || choice.Name != tool.AgentToolCron {
+	if choice.Mode != agent.ToolChoiceSpecific || choice.Name != tool.AgentToolCron {
 		t.Fatalf("expected cron forced, got %+v", choice)
 	}
 }
 
 func TestScheduleGuidanceHookForcesCancelToolWhenIDPresent(t *testing.T) {
-	run := ternura.NewRunContext("帮我取消 schedule-20260520T120000 这个提醒", ternura.RunModeSync)
+	run := agent.NewRunContext("帮我取消 schedule-20260520T120000 这个提醒", agent.RunModeSync)
 	run.ModelCallCount = 1
 
 	if err := newScheduleGuidanceHook().BeforeModelCall(context.Background(), run); err != nil {
@@ -132,13 +132,13 @@ func TestScheduleGuidanceHookForcesCancelToolWhenIDPresent(t *testing.T) {
 	}
 
 	choice := run.RequestedToolChoice()
-	if choice.Mode != ternura.ToolChoiceSpecific || choice.Name != tool.AgentToolCron {
+	if choice.Mode != agent.ToolChoiceSpecific || choice.Name != tool.AgentToolCron {
 		t.Fatalf("expected cron forced for cancel with id, got %+v", choice)
 	}
 }
 
 func TestScheduleGuidanceHookDoesNotForceCancelWithoutID(t *testing.T) {
-	run := ternura.NewRunContext("帮我取消那个提醒", ternura.RunModeSync)
+	run := agent.NewRunContext("帮我取消那个提醒", agent.RunModeSync)
 	run.ModelCallCount = 1
 
 	if err := newScheduleGuidanceHook().BeforeModelCall(context.Background(), run); err != nil {
@@ -163,7 +163,7 @@ func TestScheduleGuidanceHookDoesNotForceToolOnPureChatRequest(t *testing.T) {
 	}
 	for _, query := range cases {
 		t.Run(query, func(t *testing.T) {
-			run := ternura.NewRunContext(query, ternura.RunModeSync)
+			run := agent.NewRunContext(query, agent.RunModeSync)
 			run.ModelCallCount = 1
 
 			if err := newScheduleGuidanceHook().BeforeModelCall(context.Background(), run); err != nil {
@@ -178,7 +178,7 @@ func TestScheduleGuidanceHookDoesNotForceToolOnPureChatRequest(t *testing.T) {
 }
 
 func TestScheduleGuidanceHookDoesNotForceToolAfterFirstModelCall(t *testing.T) {
-	run := ternura.NewRunContext("2分钟后提醒我喝水", ternura.RunModeSync)
+	run := agent.NewRunContext("2分钟后提醒我喝水", agent.RunModeSync)
 	run.ModelCallCount = 2
 
 	if err := newScheduleGuidanceHook().BeforeModelCall(context.Background(), run); err != nil {
@@ -271,7 +271,7 @@ func TestLooksLikeConcreteScheduleIntent(t *testing.T) {
 }
 
 func TestScheduleGuidanceHookAddsVagueTimingGuidance(t *testing.T) {
-	run := ternura.NewRunContext("等一会告诉我天气", ternura.RunModeSync)
+	run := agent.NewRunContext("等一会告诉我天气", agent.RunModeSync)
 	run.ModelCallCount = 1
 
 	if err := newScheduleGuidanceHook().BeforeModelCall(context.Background(), run); err != nil {
