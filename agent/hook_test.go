@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	einomodel "github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 
 	"ternura/config"
@@ -162,20 +163,28 @@ func TestBeforeToolCallHookCanBlockExecution(t *testing.T) {
 		tool.NewBashTool(),
 	}, WithHooks(blockingToolHook{}))
 	runCtx := NewRunContext("hello", RunModeSync)
+	runtime := &einoAgentRun{
+		agent:  agent,
+		runCtx: runCtx,
+		result: &AgentRunResult{Trace: make([]AgentTraceItem, 0)},
+	}
+	middleware := runtime.toolCallMiddleware()
 
-	result := agent.executeTool(context.Background(), runCtx, schema.ToolCall{
-		ID: "call-1",
-		Function: schema.FunctionCall{
-			Name:      string(tool.AgentToolBash),
-			Arguments: `{"command":"echo should-not-run"}`,
-		},
+	wrapped := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+		t.Fatalf("next should not execute when BeforeToolCall blocks")
+		return nil, nil
+	})
+	output, err := wrapped(context.Background(), &compose.ToolInput{
+		Name:      string(tool.AgentToolBash),
+		Arguments: `{"command":"echo should-not-run"}`,
+		CallID:    "call-1",
 	})
 
-	if result.Err == nil {
-		t.Fatalf("expected hook to block tool call")
+	if err != nil {
+		t.Fatalf("middleware returned error: %v", err)
 	}
-	if !strings.Contains(result.Content, "blocked by policy") {
-		t.Fatalf("result content = %q", result.Content)
+	if output == nil || !strings.Contains(output.Result, "blocked by policy") {
+		t.Fatalf("output = %+v, want blocked result", output)
 	}
 	if runCtx.ToolCallCount != 1 {
 		t.Fatalf("tool call count = %d, want 1", runCtx.ToolCallCount)

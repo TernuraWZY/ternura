@@ -2,48 +2,26 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-
-	"github.com/cloudwego/eino/schema"
 )
 
-type ReadTool struct{}
+type ReadTool struct {
+	*agentTool
+}
 
 func NewReadTool() *ReadTool {
-	return &ReadTool{}
+	t := &ReadTool{}
+	t.agentTool = newAgentTool(AgentToolRead, "read file content", t.run)
+	return t
 }
 
 type ReadToolParam struct {
-	Path string `json:"path"`
+	Path string `json:"path" jsonschema:"required" jsonschema_description:"the file path to read"`
 }
 
-func (t *ReadTool) ToolName() AgentTool {
-	return AgentToolRead
-}
-
-func (t *ReadTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return NewToolInfo(AgentToolRead, "read file content", map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"path": map[string]any{
-				"type":        "string",
-				"description": "the file path to read",
-			},
-		},
-		"required": []string{"path"},
-	})
-}
-
-func (t *ReadTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
-	p := ReadToolParam{}
-	err := json.Unmarshal([]byte(argumentsInJSON), &p)
-	if err != nil {
-		return "", err
-	}
-
+func (t *ReadTool) run(ctx context.Context, p ReadToolParam) (string, error) {
 	file, err := os.Open(p.Path)
 	if err != nil {
 		return "", err

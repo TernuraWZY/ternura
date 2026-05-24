@@ -2,57 +2,27 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"strings"
-
-	"github.com/cloudwego/eino/schema"
 )
 
-type EditTool struct{}
+type EditTool struct {
+	*agentTool
+}
 
 func NewEditTool() *EditTool {
-	return &EditTool{}
+	t := &EditTool{}
+	t.agentTool = newAgentTool(AgentToolEdit, "edit content in file", t.run)
+	return t
 }
 
 type EditToolParam struct {
-	Path   string `json:"path"`
-	Before string `json:"before"`
-	After  string `json:"after"`
+	Path   string `json:"path" jsonschema:"required" jsonschema_description:"the file path to edit"`
+	Before string `json:"before" jsonschema:"required" jsonschema_description:"the content to search for"`
+	After  string `json:"after" jsonschema:"required" jsonschema_description:"the content to replace with"`
 }
 
-func (t *EditTool) ToolName() AgentTool {
-	return AgentToolEdit
-}
-
-func (t *EditTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return NewToolInfo(AgentToolEdit, "edit content in file", map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"path": map[string]any{
-				"type":        "string",
-				"description": "the file path to edit",
-			},
-			"before": map[string]any{
-				"type":        "string",
-				"description": "the content to search for",
-			},
-			"after": map[string]any{
-				"type":        "string",
-				"description": "the content to replace with",
-			},
-		},
-		"required": []string{"path", "before", "after"},
-	})
-}
-
-func (t *EditTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
-	p := EditToolParam{}
-	err := json.Unmarshal([]byte(argumentsInJSON), &p)
-	if err != nil {
-		return "", err
-	}
-
+func (t *EditTool) run(ctx context.Context, p EditToolParam) (string, error) {
 	raw, err := os.ReadFile(p.Path)
 	if err != nil {
 		return "", err

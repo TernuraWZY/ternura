@@ -124,62 +124,11 @@ func (a *Agent) RestoreConversation(messages []ConversationMessage) {
 	}
 }
 
-func (a *Agent) execute(ctx context.Context, toolName string, argumentsInJSON string) (string, error) {
-	t, ok := a.tools[tool.AgentTool(toolName)]
-	if !ok {
-		return "", errors.New("tool not found")
-	}
-	return t.InvokableRun(ctx, argumentsInJSON)
-}
-
 func (a *Agent) ensureChatModel() error {
 	if a.chatModel == nil {
 		return errors.New("chat model is not initialized")
 	}
 	return nil
-}
-
-func (a *Agent) executeTool(ctx context.Context, runCtx *RunContext, call schema.ToolCall) ToolResult {
-	return a.executeToolWithRunner(ctx, runCtx, call, func(ctx context.Context) (string, error) {
-		return a.execute(ctx, call.Function.Name, call.Function.Arguments)
-	})
-}
-
-func (a *Agent) executeToolWithRunner(ctx context.Context, runCtx *RunContext, call schema.ToolCall, runner func(context.Context) (string, error)) ToolResult {
-	if runCtx != nil {
-		runCtx.ToolCallCount++
-	}
-
-	if err := a.hooks.BeforeToolCall(ctx, runCtx, &call); err != nil {
-		result := ToolResult{
-			Call:    call,
-			Content: err.Error(),
-			Err:     err,
-		}
-		if runCtx != nil {
-			runCtx.recordToolResult(result)
-		}
-		return result
-	}
-
-	content, err := runner(ctx)
-	if err != nil {
-		content = err.Error()
-	}
-	result := ToolResult{
-		Call:    call,
-		Content: content,
-		Err:     err,
-	}
-
-	if err := a.hooks.AfterToolCall(ctx, runCtx, &result); err != nil {
-		result.Err = err
-		result.Content = err.Error()
-	}
-	if runCtx != nil {
-		runCtx.recordToolResult(result)
-	}
-	return result
 }
 
 // Run 提供对于单次用户请求 query 的 tool loop，返回本轮结果的输出。Run 会保持当前对话历史，不同主题的对话轮次应该初始化多个 Agent 实例运行。

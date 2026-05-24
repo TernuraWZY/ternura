@@ -349,13 +349,46 @@ func (r *einoAgentRun) toolCallMiddleware() compose.ToolMiddleware {
 						Arguments: input.Arguments,
 					},
 				}
-				toolResult := r.agent.executeToolWithRunner(ctx, r.runCtx, call, func(ctx context.Context) (string, error) {
-					output, err := next(ctx, input)
-					if output == nil {
-						return "", err
+				if r.runCtx != nil {
+					r.runCtx.ToolCallCount++
+				}
+
+				if err := r.agent.hooks.BeforeToolCall(ctx, r.runCtx, &call); err != nil {
+					toolResult := ToolResult{
+						Call:    call,
+						Content: err.Error(),
+						Err:     err,
 					}
-					return output.Result, err
-				})
+					if r.runCtx != nil {
+						r.runCtx.recordToolResult(toolResult)
+					}
+					if err := r.recordToolTrace(toolResult); err != nil {
+						return nil, err
+					}
+					return &compose.ToolOutput{Result: toolResult.Content}, nil
+				}
+
+				output, err := next(ctx, input)
+				content := ""
+				if output != nil {
+					content = output.Result
+				}
+				if err != nil {
+					content = err.Error()
+				}
+				toolResult := ToolResult{
+					Call:    call,
+					Content: content,
+					Err:     err,
+				}
+
+				if err := r.agent.hooks.AfterToolCall(ctx, r.runCtx, &toolResult); err != nil {
+					toolResult.Err = err
+					toolResult.Content = err.Error()
+				}
+				if r.runCtx != nil {
+					r.runCtx.recordToolResult(toolResult)
+				}
 				if err := r.recordToolTrace(toolResult); err != nil {
 					return nil, err
 				}

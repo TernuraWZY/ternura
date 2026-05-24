@@ -2,11 +2,8 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/cloudwego/eino/schema"
 )
 
 const (
@@ -18,76 +15,36 @@ const (
 )
 
 type TodoItem struct {
-	ID      string `json:"id,omitempty"`
-	Content string `json:"content"`
-	Status  string `json:"status"`
+	ID      string `json:"id,omitempty" jsonschema_description:"Stable short identifier for this todo, such as todo-1."`
+	Content string `json:"content" jsonschema:"required" jsonschema_description:"Concrete task step written for the user."`
+	Status  string `json:"status" jsonschema:"required,enum=pending,enum=in_progress,enum=done,enum=blocked,enum=cancelled" jsonschema_description:"Current task status."`
 }
 
 type UpdateTodosFunc func(ctx context.Context, todos []TodoItem) error
 
 type UpdateTodosTool struct {
+	*agentTool
 	update UpdateTodosFunc
 }
 
 type updateTodosToolParam struct {
-	Todos []TodoItem `json:"todos"`
+	Todos []TodoItem `json:"todos" jsonschema:"required" jsonschema_description:"The complete ordered todo list for the current session. Send an empty array to clear the list."`
 }
 
 func NewUpdateTodosTool(update UpdateTodosFunc) *UpdateTodosTool {
 	if update == nil {
 		update = func(context.Context, []TodoItem) error { return nil }
 	}
-	return &UpdateTodosTool{update: update}
-}
-
-func (t *UpdateTodosTool) ToolName() AgentTool {
-	return AgentToolUpdateTodos
-}
-
-func (t *UpdateTodosTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return NewToolInfo(
+	t := &UpdateTodosTool{update: update}
+	t.agentTool = newAgentTool(
 		AgentToolUpdateTodos,
 		"Replace the current session todo list with the complete ordered task plan. Use this for multi-step tasks and whenever task status changes.",
-		map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"todos": map[string]any{
-					"type":        "array",
-					"description": "The complete ordered todo list for the current session. Send an empty array to clear the list.",
-					"items": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"id": map[string]any{
-								"type":        "string",
-								"description": "Stable short identifier for this todo, such as todo-1.",
-							},
-							"content": map[string]any{
-								"type":        "string",
-								"description": "Concrete task step written for the user.",
-							},
-							"status": map[string]any{
-								"type":        "string",
-								"description": "Current task status.",
-								"enum":        []string{TodoStatusPending, TodoStatusInProgress, TodoStatusDone, TodoStatusBlocked, TodoStatusCancelled},
-							},
-						},
-						"required":             []string{"content", "status"},
-						"additionalProperties": false,
-					},
-				},
-			},
-			"required":             []string{"todos"},
-			"additionalProperties": false,
-		},
+		t.run,
 	)
+	return t
 }
 
-func (t *UpdateTodosTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
-	p := updateTodosToolParam{}
-	if err := json.Unmarshal([]byte(argumentsInJSON), &p); err != nil {
-		return "", err
-	}
-
+func (t *UpdateTodosTool) run(ctx context.Context, p updateTodosToolParam) (string, error) {
 	todos, err := normalizeTodoItems(p.Todos)
 	if err != nil {
 		return "", err

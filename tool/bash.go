@@ -2,47 +2,25 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"os/exec"
 	"runtime"
-
-	"github.com/cloudwego/eino/schema"
 )
 
-type BashTool struct{}
+type BashTool struct {
+	*agentTool
+}
 
 func NewBashTool() *BashTool {
-	return &BashTool{}
+	t := &BashTool{}
+	t.agentTool = newAgentTool(AgentToolBash, "execute bash command", t.run)
+	return t
 }
 
 type BashToolParam struct {
-	Command string `json:"command"`
+	Command string `json:"command" jsonschema:"required" jsonschema_description:"the bash command to execute"`
 }
 
-func (t *BashTool) ToolName() AgentTool {
-	return AgentToolBash
-}
-
-func (t *BashTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return NewToolInfo(AgentToolBash, "execute bash command", map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"command": map[string]any{
-				"type":        "string",
-				"description": "the bash command to execute",
-			},
-		},
-		"required": []string{"command"},
-	})
-}
-
-func (t *BashTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
-	p := BashToolParam{}
-	err := json.Unmarshal([]byte(argumentsInJSON), &p)
-	if err != nil {
-		return "", err
-	}
-
+func (t *BashTool) run(ctx context.Context, p BashToolParam) (string, error) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		// Windows: use cmd.exe to interpret the command line

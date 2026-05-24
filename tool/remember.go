@@ -2,11 +2,8 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/cloudwego/eino/schema"
 )
 
 const (
@@ -19,9 +16,9 @@ const (
 )
 
 type MemoryItem struct {
-	Category string `json:"category"`
-	Content  string `json:"content"`
-	Source   string `json:"source,omitempty"`
+	Category string `json:"category" jsonschema:"required,enum=preference,enum=profile,enum=project,enum=instruction,enum=fact,enum=other" jsonschema_description:"Memory category."`
+	Content  string `json:"content" jsonschema:"required" jsonschema_description:"Concise durable memory to store. Write it as a standalone sentence."`
+	Source   string `json:"source,omitempty" jsonschema_description:"Optional short reason or source, such as explicit user preference."`
 }
 
 type MemoryResult struct {
@@ -35,11 +32,17 @@ type RememberFunc func(ctx context.Context, item MemoryItem) (MemoryResult, erro
 type ForgetMemoryFunc func(ctx context.Context, id string) error
 
 type RememberTool struct {
+	*agentTool
 	remember RememberFunc
 }
 
 type ForgetMemoryTool struct {
+	*agentTool
 	forget ForgetMemoryFunc
+}
+
+type forgetMemoryToolParam struct {
+	ID string `json:"id" jsonschema:"required" jsonschema_description:"The memory id to delete, such as memory-20260520T120000000000000."`
 }
 
 func NewRememberTool(remember RememberFunc) *RememberTool {
@@ -48,53 +51,29 @@ func NewRememberTool(remember RememberFunc) *RememberTool {
 			return MemoryResult{}, nil
 		}
 	}
-	return &RememberTool{remember: remember}
+	t := &RememberTool{remember: remember}
+	t.agentTool = newAgentTool(
+		AgentToolRemember,
+		"Store a durable long-term memory about the user, project, or agent behavior. Use only for stable, reusable facts, explicit preferences, or standing instructions; never store secrets or transient chat details.",
+		t.run,
+	)
+	return t
 }
 
 func NewForgetMemoryTool(forget ForgetMemoryFunc) *ForgetMemoryTool {
 	if forget == nil {
 		forget = func(context.Context, string) error { return nil }
 	}
-	return &ForgetMemoryTool{forget: forget}
-}
-
-func (t *RememberTool) ToolName() AgentTool {
-	return AgentToolRemember
-}
-
-func (t *RememberTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return NewToolInfo(
-		AgentToolRemember,
-		"Store a durable long-term memory about the user, project, or agent behavior. Use only for stable, reusable facts, explicit preferences, or standing instructions; never store secrets or transient chat details.",
-		map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"category": map[string]any{
-					"type":        "string",
-					"description": "Memory category.",
-					"enum":        []string{MemoryCategoryPreference, MemoryCategoryProfile, MemoryCategoryProject, MemoryCategoryInstruction, MemoryCategoryFact, MemoryCategoryOther},
-				},
-				"content": map[string]any{
-					"type":        "string",
-					"description": "Concise durable memory to store. Write it as a standalone sentence.",
-				},
-				"source": map[string]any{
-					"type":        "string",
-					"description": "Optional short reason or source, such as explicit user preference.",
-				},
-			},
-			"required":             []string{"category", "content"},
-			"additionalProperties": false,
-		},
+	t := &ForgetMemoryTool{forget: forget}
+	t.agentTool = newAgentTool(
+		AgentToolForgetMemory,
+		"Delete a long-term memory by id when it is stale, wrong, or the user asks to forget it.",
+		t.run,
 	)
+	return t
 }
 
-func (t *RememberTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
-	p := MemoryItem{}
-	if err := json.Unmarshal([]byte(argumentsInJSON), &p); err != nil {
-		return "", err
-	}
-
+func (t *RememberTool) run(ctx context.Context, p MemoryItem) (string, error) {
 	item, err := NormalizeMemoryItem(p)
 	if err != nil {
 		return "", err
@@ -115,35 +94,7 @@ func (t *RememberTool) InvokableRun(ctx context.Context, argumentsInJSON string,
 	return fmt.Sprintf("Memory stored: [%s] %s (%s)", result.ID, result.Content, result.Category), nil
 }
 
-func (t *ForgetMemoryTool) ToolName() AgentTool {
-	return AgentToolForgetMemory
-}
-
-func (t *ForgetMemoryTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return NewToolInfo(
-		AgentToolForgetMemory,
-		"Delete a long-term memory by id when it is stale, wrong, or the user asks to forget it.",
-		map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"id": map[string]any{
-					"type":        "string",
-					"description": "The memory id to delete, such as memory-20260520T120000000000000.",
-				},
-			},
-			"required":             []string{"id"},
-			"additionalProperties": false,
-		},
-	)
-}
-
-func (t *ForgetMemoryTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
-	p := struct {
-		ID string `json:"id"`
-	}{}
-	if err := json.Unmarshal([]byte(argumentsInJSON), &p); err != nil {
-		return "", err
-	}
+func (t *ForgetMemoryTool) run(ctx context.Context, p forgetMemoryToolParam) (string, error) {
 	id := strings.TrimSpace(p.ID)
 	if id == "" {
 		return "", fmt.Errorf("id is required")

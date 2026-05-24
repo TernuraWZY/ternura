@@ -2,12 +2,9 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
-
-	"github.com/cloudwego/eino/schema"
 )
 
 // CronAddParams 创建 cron 任务。
@@ -35,100 +32,42 @@ type CronListFunc func(ctx context.Context) (string, error)
 type CronRemoveFunc func(ctx context.Context, jobID string) (string, error)
 
 type CronTool struct {
+	*agentTool
 	add    CronAddFunc
 	list   CronListFunc
 	remove CronRemoveFunc
 	inCron atomic.Bool
 }
 
+type cronToolParam struct {
+	Action       string `json:"action" jsonschema:"required,enum=add,enum=list,enum=remove" jsonschema_description:"add: create job; list: show jobs; remove: delete job by id"`
+	Name         string `json:"name,omitempty" jsonschema_description:"Optional short label, e.g. 'weather reminder'"`
+	Message      string `json:"message,omitempty" jsonschema_description:"Required for add. Instruction to execute when the job fires."`
+	EverySeconds int    `json:"every_seconds,omitempty" jsonschema_description:"Recurring interval in seconds"`
+	CronExpr     string `json:"cron_expr,omitempty" jsonschema_description:"Cron expression such as '0 9 * * *'"`
+	TZ           string `json:"tz,omitempty" jsonschema_description:"IANA timezone for cron_expr, e.g. Asia/Shanghai"`
+	At           string `json:"at,omitempty" jsonschema_description:"One-time ISO datetime, e.g. 2026-05-22T09:00:00+08:00"`
+	DelaySeconds int    `json:"delay_seconds,omitempty" jsonschema_description:"Relative one-time delay in seconds (maps to at)"`
+	JobID        string `json:"job_id,omitempty" jsonschema_description:"Required for remove"`
+	Deliver      *bool  `json:"deliver,omitempty" jsonschema_description:"Whether to deliver the result to the user (default true)"`
+}
+
 func NewCronTool(add CronAddFunc, list CronListFunc, remove CronRemoveFunc) *CronTool {
-	return &CronTool{add: add, list: list, remove: remove}
+	t := &CronTool{add: add, list: list, remove: remove}
+	t.agentTool = newAgentTool(AgentToolCron, cronToolDescription, t.run)
+	return t
 }
 
 func (t *CronTool) SetCronContext(active bool) {
 	t.inCron.Store(active)
 }
 
-func (t *CronTool) ToolName() AgentTool {
-	return AgentToolCron
-}
+const cronToolDescription = "Schedule reminders and recurring tasks. Actions: add, list, remove. " +
+	"Use add with message plus exactly one schedule: every_seconds, cron_expr (+ optional tz), or at (ISO datetime). " +
+	"For relative delays like '2 minutes', use delay_seconds on add. " +
+	"Do not claim a job exists until this tool succeeds."
 
-func (t *CronTool) Info(context.Context) (*schema.ToolInfo, error) {
-	desc := "Schedule reminders and recurring tasks. Actions: add, list, remove. " +
-		"Use add with message plus exactly one schedule: every_seconds, cron_expr (+ optional tz), or at (ISO datetime). " +
-		"For relative delays like '2 minutes', use delay_seconds on add. " +
-		"Do not claim a job exists until this tool succeeds."
-	return NewToolInfo(
-		AgentToolCron,
-		desc,
-		map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"action": map[string]any{
-					"type":        "string",
-					"enum":        []string{"add", "list", "remove"},
-					"description": "add: create job; list: show jobs; remove: delete job by id",
-				},
-				"name": map[string]any{
-					"type":        "string",
-					"description": "Optional short label, e.g. 'weather reminder'",
-				},
-				"message": map[string]any{
-					"type":        "string",
-					"description": "Required for add. Instruction to execute when the job fires.",
-				},
-				"every_seconds": map[string]any{
-					"type":        "integer",
-					"description": "Recurring interval in seconds",
-				},
-				"cron_expr": map[string]any{
-					"type":        "string",
-					"description": "Cron expression such as '0 9 * * *'",
-				},
-				"tz": map[string]any{
-					"type":        "string",
-					"description": "IANA timezone for cron_expr, e.g. Asia/Shanghai",
-				},
-				"at": map[string]any{
-					"type":        "string",
-					"description": "One-time ISO datetime, e.g. 2026-05-22T09:00:00+08:00",
-				},
-				"delay_seconds": map[string]any{
-					"type":        "integer",
-					"description": "Relative one-time delay in seconds (maps to at)",
-				},
-				"job_id": map[string]any{
-					"type":        "string",
-					"description": "Required for remove",
-				},
-				"deliver": map[string]any{
-					"type":        "boolean",
-					"description": "Whether to deliver the result to the user (default true)",
-				},
-			},
-			"required":             []string{"action"},
-			"additionalProperties": false,
-		},
-	)
-}
-
-func (t *CronTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
-	var params struct {
-		Action       string `json:"action"`
-		Name         string `json:"name"`
-		Message      string `json:"message"`
-		EverySeconds int    `json:"every_seconds"`
-		CronExpr     string `json:"cron_expr"`
-		TZ           string `json:"tz"`
-		At           string `json:"at"`
-		DelaySeconds int    `json:"delay_seconds"`
-		JobID        string `json:"job_id"`
-		Deliver      *bool  `json:"deliver"`
-	}
-	if err := json.Unmarshal([]byte(argumentsInJSON), &params); err != nil {
-		return "", err
-	}
-
+func (t *CronTool) run(ctx context.Context, params cronToolParam) (string, error) {
 	switch strings.TrimSpace(params.Action) {
 	case "add":
 		if t.inCron.Load() {

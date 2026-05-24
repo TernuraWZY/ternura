@@ -2,51 +2,25 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"os"
-
-	"github.com/cloudwego/eino/schema"
 )
 
-type WriteTool struct{}
+type WriteTool struct {
+	*agentTool
+}
 
 func NewWriteTool() *WriteTool {
-	return &WriteTool{}
+	t := &WriteTool{}
+	t.agentTool = newAgentTool(AgentToolWrite, "write content to file", t.run)
+	return t
 }
 
 type WriteToolParam struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path    string `json:"path" jsonschema:"required" jsonschema_description:"the file path to write"`
+	Content string `json:"content" jsonschema:"required" jsonschema_description:"the content to write to the file"`
 }
 
-func (t *WriteTool) ToolName() AgentTool {
-	return AgentToolWrite
-}
-
-func (t *WriteTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return NewToolInfo(AgentToolWrite, "write content to file", map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"path": map[string]any{
-				"type":        "string",
-				"description": "the file path to write",
-			},
-			"content": map[string]any{
-				"type":        "string",
-				"description": "the content to write to the file",
-			},
-		},
-		"required": []string{"path", "content"},
-	})
-}
-
-func (t *WriteTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...Option) (string, error) {
-	p := WriteToolParam{}
-	err := json.Unmarshal([]byte(argumentsInJSON), &p)
-	if err != nil {
-		return "", err
-	}
-
+func (t *WriteTool) run(ctx context.Context, p WriteToolParam) (string, error) {
 	file, err := os.OpenFile(p.Path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return "", err
