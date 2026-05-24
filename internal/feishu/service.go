@@ -60,10 +60,20 @@ type OutboundMessage struct {
 	MessageID     string
 	ThreadID      string
 	Content       string
+	Card          any
 	Reply         bool
 }
 
-type HandlerFunc func(context.Context, InboundMessage) (string, error)
+type Reply struct {
+	Content string
+	Card    any
+}
+
+func (r Reply) Empty() bool {
+	return r.Card == nil && strings.TrimSpace(r.Content) == ""
+}
+
+type HandlerFunc func(context.Context, InboundMessage) (Reply, error)
 
 type Service struct {
 	cfg    Config
@@ -175,12 +185,12 @@ func (s *Service) process(ctx context.Context, inbound InboundMessage) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
-	content, err := s.handle(ctx, inbound)
+	replyMessage, err := s.handle(ctx, inbound)
 	if err != nil {
 		log.Printf("feishu agent turn failed for %s: %v", inbound.MessageID, err)
-		content = "处理失败：" + err.Error()
+		replyMessage = Reply{Content: "处理失败：" + err.Error()}
 	}
-	if strings.TrimSpace(content) == "" {
+	if replyMessage.Empty() {
 		return
 	}
 
@@ -190,7 +200,8 @@ func (s *Service) process(ctx context.Context, inbound InboundMessage) {
 		ReceiveID:     inbound.ReceiveID,
 		MessageID:     inbound.MessageID,
 		ThreadID:      inbound.ThreadID,
-		Content:       content,
+		Content:       replyMessage.Content,
+		Card:          replyMessage.Card,
 		Reply:         reply,
 	}); err != nil {
 		log.Printf("feishu send reply failed for %s: %v", inbound.MessageID, err)
@@ -201,10 +212,10 @@ func (s *Service) Send(ctx context.Context, out OutboundMessage) error {
 	if !s.Enabled() {
 		return errors.New("feishu is disabled")
 	}
-	if strings.TrimSpace(out.Content) == "" {
+	if out.Card == nil && strings.TrimSpace(out.Content) == "" {
 		return nil
 	}
-	msgType, content, err := formatMessageContent(out.Content)
+	msgType, content, err := formatOutboundContent(out.Content, out.Card)
 	if err != nil {
 		return err
 	}

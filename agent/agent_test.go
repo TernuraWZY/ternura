@@ -62,6 +62,9 @@ func TestRunWithTraceUsesEinoReactToolLoop(t *testing.T) {
 	if len(result.Trace) != 1 || result.Trace[0].Title != "Tool use: fake_tool" {
 		t.Fatalf("trace = %+v", result.Trace)
 	}
+	if !containsToolMessage(agent.messages, "call-1", "tool ok") {
+		t.Fatalf("conversation history does not contain Eino tool message: %+v", agent.messages)
+	}
 }
 
 func TestRunStreamingUsesEinoReactToolLoop(t *testing.T) {
@@ -118,6 +121,9 @@ func TestRunStreamingUsesEinoReactToolLoop(t *testing.T) {
 	}
 	if combinedEventDeltas(events, "content_delta") != "stream done" || !hasEvent(events, "done", "stream done") {
 		t.Fatalf("events = %+v", events)
+	}
+	if !containsToolMessage(agent.messages, "stream-call-1", "stream tool ok") {
+		t.Fatalf("conversation history does not contain Eino stream tool message: %+v", agent.messages)
 	}
 }
 

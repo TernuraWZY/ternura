@@ -11,7 +11,7 @@ import (
 	"ternura/tool"
 )
 
-func (s *agentServer) handleFeishuMessage(ctx context.Context, msg feishu.InboundMessage) (string, error) {
+func (s *agentServer) handleFeishuMessage(ctx context.Context, msg feishu.InboundMessage) (feishu.Reply, error) {
 	sessionID := feishu.SessionIDForKey(msg.SessionKey)
 	delivery := feishuDeliveryTarget(msg)
 
@@ -19,7 +19,7 @@ func (s *agentServer) handleFeishuMessage(ctx context.Context, msg feishu.Inboun
 	defer s.mu.Unlock()
 
 	if _, err := s.store.EnsureSession(sessionID, feishu.SessionTitle(msg)); err != nil {
-		return "", err
+		return feishu.Reply{}, err
 	}
 
 	run := newRunLifecycle()
@@ -42,7 +42,7 @@ func (s *agentServer) handleFeishuMessage(ctx context.Context, msg feishu.Inboun
 	return s.finishFeishuRun(sessionID, run, msg.Content, result, err)
 }
 
-func (s *agentServer) finishFeishuRun(sessionID string, run runLifecycle, message string, result agent.AgentRunResult, runErr error) (string, error) {
+func (s *agentServer) finishFeishuRun(sessionID string, run runLifecycle, message string, result agent.AgentRunResult, runErr error) (feishu.Reply, error) {
 	finished := time.Now()
 	status := runStatusSucceeded
 	if runErr != nil {
@@ -53,9 +53,9 @@ func (s *agentServer) finishFeishuRun(sessionID string, run runLifecycle, messag
 		log.Printf("persist feishu run %s: %v", run.ID, err)
 	}
 	if runErr != nil {
-		return result.Content, runErr
+		return formatFeishuAgentReply(result), runErr
 	}
-	return result.Content, nil
+	return formatFeishuAgentReply(result), nil
 }
 
 func feishuDeliveryTarget(msg feishu.InboundMessage) *cron.DeliveryTarget {
@@ -80,12 +80,14 @@ func (s *agentServer) deliverCronResult(ctx context.Context, job cron.Job, resul
 		if s.feishu == nil || !s.feishu.Enabled() {
 			return
 		}
+		reply := formatFeishuAgentReply(result)
 		err := s.feishu.Send(ctx, feishu.OutboundMessage{
 			ReceiveIDType: job.Payload.Delivery.ReceiveIDType,
 			ReceiveID:     job.Payload.Delivery.ReceiveID,
 			MessageID:     job.Payload.Delivery.MessageID,
 			ThreadID:      job.Payload.Delivery.ThreadID,
-			Content:       result.Content,
+			Content:       reply.Content,
+			Card:          reply.Card,
 			Reply:         job.Payload.Delivery.ThreadID != "",
 		})
 		if err != nil {

@@ -235,6 +235,14 @@ func formatMessageContent(content string) (string, string, error) {
 	return "interactive", string(payload), err
 }
 
+func formatOutboundContent(content string, card any) (string, string, error) {
+	if card != nil {
+		payload, err := json.Marshal(card)
+		return "interactive", string(payload), err
+	}
+	return formatMessageContent(content)
+}
+
 func shouldUseText(content string) bool {
 	if len([]rune(content)) > 200 {
 		return false
