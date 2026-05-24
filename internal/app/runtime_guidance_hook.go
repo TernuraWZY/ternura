@@ -61,7 +61,7 @@ func (h *scheduleGuidanceHook) BeforeModelCall(_ context.Context, run *agent.Run
 	if isCronRuntimePrompt(query) {
 		run.SetContextBlock("schedule-guidance", "Schedule Guidance", "")
 		run.SetContextBlock("cron-execution-guidance", "Cron Execution", cronExecutionGuidanceText(unwrapCronRuntimePrompt(query)))
-		run.ClearToolChoice()
+		run.ClearToolPolicy()
 		return nil
 	}
 
@@ -76,25 +76,19 @@ func (h *scheduleGuidanceHook) BeforeModelCall(_ context.Context, run *agent.Run
 	}
 	run.SetContextBlock("schedule-guidance", "Schedule Guidance", scheduleGuidanceText(query, isVague))
 
-	// 工具已执行后不再强制 tool_choice，让模型用自然语言收尾。
+	// 工具已执行后不再要求工具，让模型用自然语言收尾。
 	if run.ToolCallCount > 0 {
-		run.ClearToolChoice()
+		run.ClearToolPolicy()
 	}
 
-	// 仅在首轮（工具结果回来之前）强制 tool_choice，避免后续模型被迫继续调工具而无法收尾。
+	// 仅在首轮（工具结果回来之前）要求 cron 工具，避免后续模型被迫继续调工具而无法收尾。
 	// 仅在意图非常明确（双门槛或携带 schedule id 的取消请求）时才强制，避免误命中聊天请求。
 	if run.ModelCallCount == 1 {
 		switch {
 		case isCancel && cronJobIDPattern.MatchString(query):
-			run.SetToolChoice(agent.ToolChoice{
-				Mode: agent.ToolChoiceSpecific,
-				Name: tool.AgentToolCron,
-			})
+			run.SetToolPolicy(agent.RequireTool(tool.AgentToolCron))
 		case isStrong:
-			run.SetToolChoice(agent.ToolChoice{
-				Mode: agent.ToolChoiceSpecific,
-				Name: tool.AgentToolCron,
-			})
+			run.SetToolPolicy(agent.RequireTool(tool.AgentToolCron))
 		}
 	}
 	return nil
@@ -111,7 +105,7 @@ func looksLikeStrongScheduleIntent(query string) bool {
 }
 
 // looksLikeWeakScheduleIntent 弱判定：包含明确的调度术语（即便没有时间或动词）。
-// 用作 guidance 文本注入的触发，不用于 tool_choice 强制，因此误判代价仅是多一段无关提示。
+// 用作 guidance 文本注入的触发，不用于 Required 工具策略，因此误判代价仅是多一段无关提示。
 func looksLikeWeakScheduleIntent(query string) bool {
 	lower := strings.ToLower(query)
 	keywords := []string{

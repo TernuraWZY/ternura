@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -18,12 +19,15 @@ func TestRunWithTraceUsesEinoReactToolLoop(t *testing.T) {
 		result: "tool ok",
 	}
 	model := &scriptedChatModel{}
+	modelHook := &runtimeContextHook{}
 	model.generate = func(call int, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
 		switch call {
 		case 1:
-			options := einomodel.GetCommonOptions(&einomodel.Options{}, opts...)
-			if len(options.Tools) != 1 || options.Tools[0].Name != string(fakeTool.name) {
-				t.Fatalf("model tools = %+v, want fake_tool", options.Tools)
+			if len(model.boundTools) != 1 || model.boundTools[0].Name != string(fakeTool.name) {
+				t.Fatalf("model tools = %+v, want fake_tool", model.boundTools)
+			}
+			if !containsSystemContent(input, "first model call") {
+				t.Fatalf("first model input missing runtime context: %+v", input)
 			}
 			return schema.AssistantMessage("", []schema.ToolCall{{
 				ID: "call-1",
@@ -36,6 +40,9 @@ func TestRunWithTraceUsesEinoReactToolLoop(t *testing.T) {
 			if !containsToolMessage(input, "call-1", "tool ok") {
 				t.Fatalf("second model input does not contain tool result: %+v", input)
 			}
+			if !containsSystemContent(input, "second model call") {
+				t.Fatalf("second model input missing refreshed runtime context: %+v", input)
+			}
 			return schema.AssistantMessage("done", nil), nil
 		default:
 			t.Fatalf("unexpected generate call %d", call)
@@ -43,7 +50,7 @@ func TestRunWithTraceUsesEinoReactToolLoop(t *testing.T) {
 		}
 	}
 
-	agent := NewAgent(testModelConfig(), "system", []tool.Tool{fakeTool})
+	agent := NewAgent(testModelConfig(), "system", []tool.Tool{fakeTool}, WithHooks(modelHook))
 	agent.chatModel = model
 
 	result, err := agent.RunWithTrace(context.Background(), "use the fake tool")
@@ -55,6 +62,9 @@ func TestRunWithTraceUsesEinoReactToolLoop(t *testing.T) {
 	}
 	if model.generateCalls != 2 {
 		t.Fatalf("generate calls = %d, want 2", model.generateCalls)
+	}
+	if modelHook.calls != 2 {
+		t.Fatalf("before model hook calls = %d, want 2", modelHook.calls)
 	}
 	if len(fakeTool.calls) != 1 || fakeTool.calls[0] != `{"value":"hello"}` {
 		t.Fatalf("tool calls = %+v", fakeTool.calls)
@@ -182,8 +192,32 @@ func (t *fakeAgentTool) InvokableRun(_ context.Context, argumentsInJSON string, 
 type scriptedChatModel struct {
 	generate      func(call int, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error)
 	stream        func(call int, input []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error)
+	boundTools    []*schema.ToolInfo
 	generateCalls int
 	streamCalls   int
+}
+
+type runtimeContextHook struct {
+	calls int
+}
+
+func (h *runtimeContextHook) HookName() string {
+	return "runtime_context_test"
+}
+
+func (h *runtimeContextHook) BeforeModelCall(_ context.Context, run *RunContext) error {
+	h.calls++
+	content := "first model call"
+	if h.calls > 1 {
+		content = "second model call"
+	}
+	run.SetContextBlock("test-runtime", "Test Runtime", content)
+	return nil
+}
+
+func (m *scriptedChatModel) WithTools(tools []*schema.ToolInfo) (einomodel.ToolCallingChatModel, error) {
+	m.boundTools = append([]*schema.ToolInfo(nil), tools...)
+	return m, nil
 }
 
 func (m *scriptedChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
@@ -205,6 +239,15 @@ func (m *scriptedChatModel) Stream(ctx context.Context, input []*schema.Message,
 func containsToolMessage(messages []*schema.Message, callID string, content string) bool {
 	for _, message := range messages {
 		if message.Role == schema.Tool && message.ToolCallID == callID && message.Content == content {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSystemContent(messages []*schema.Message, content string) bool {
+	for _, message := range messages {
+		if message.Role == schema.System && strings.Contains(message.Content, content) {
 			return true
 		}
 	}

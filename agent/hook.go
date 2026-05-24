@@ -24,22 +24,25 @@ type RuntimeContextBlock struct {
 	Content string
 }
 
-// ToolChoiceMode 表示本次模型调用对 tool 选择的约束强度。
-// - Auto：默认，等价于不设置 tool_choice，由模型自己决定是否调工具。
-// - Required：必须调任意一个可用工具，不能纯文本回答。
-// - Specific：必须调用 Name 指定的那个工具。
-type ToolChoiceMode string
+// ToolPolicy 描述本轮模型调用的工具使用策略。
+// 它不直接执行工具，只影响 Eino ReAct 暴露哪些工具，以及是否要求模型先调用工具。
+type ToolPolicy struct {
+	Required     bool
+	AllowedTools []tool.AgentTool
+}
 
-const (
-	ToolChoiceAuto     ToolChoiceMode = "auto"
-	ToolChoiceRequired ToolChoiceMode = "required"
-	ToolChoiceSpecific ToolChoiceMode = "specific"
-)
+func RequireAnyTool() ToolPolicy {
+	return ToolPolicy{Required: true}
+}
 
-// ToolChoice 描述一次模型调用希望强制的 tool 选择。Mode 为 Specific 时 Name 必填。
-type ToolChoice struct {
-	Mode ToolChoiceMode
-	Name tool.AgentTool
+func RequireTool(name tool.AgentTool) ToolPolicy {
+	if strings.TrimSpace(string(name)) == "" {
+		return ToolPolicy{}
+	}
+	return ToolPolicy{
+		Required:     true,
+		AllowedTools: []tool.AgentTool{name},
+	}
 }
 
 type RunContext struct {
@@ -52,7 +55,7 @@ type RunContext struct {
 	contextBlocks []RuntimeContextBlock
 	disabledTools map[tool.AgentTool]string
 	toolResults   []ToolExecution
-	toolChoice    ToolChoice
+	toolPolicy    ToolPolicy
 }
 
 func NewRunContext(query string, mode RunMode) *RunContext {
@@ -64,33 +67,62 @@ func NewRunContext(query string, mode RunMode) *RunContext {
 	}
 }
 
-// SetToolChoice 写入本轮模型调用希望强制的 tool 选择。
-// hook 通常应该只在 ModelCallCount == 1（首轮）设置 Required/Specific，
-// 工具返回后让 agent loop 自动回到 Auto，避免被迫死循环调工具。
-func (r *RunContext) SetToolChoice(choice ToolChoice) {
+// SetToolPolicy 写入本轮模型调用的工具使用策略。
+// hook 通常只在 ModelCallCount == 1（首轮）设置 Required，工具返回后 agent loop 会清空策略。
+func (r *RunContext) SetToolPolicy(policy ToolPolicy) {
 	if r == nil {
 		return
 	}
-	if choice.Mode == ToolChoiceSpecific && strings.TrimSpace(string(choice.Name)) == "" {
-		return
-	}
-	r.toolChoice = choice
+	r.toolPolicy = normalizeToolPolicy(policy)
 }
 
-// ClearToolChoice 把强制选择清空，回到默认的 Auto 行为。
-func (r *RunContext) ClearToolChoice() {
+// ClearToolPolicy 清空工具使用策略，回到默认的 auto 行为。
+func (r *RunContext) ClearToolPolicy() {
 	if r == nil {
 		return
 	}
-	r.toolChoice = ToolChoice{}
+	r.toolPolicy = ToolPolicy{}
 }
 
-// RequestedToolChoice 返回当前 RunContext 持有的强制 tool 选择，未设置时返回零值（Auto）。
-func (r *RunContext) RequestedToolChoice() ToolChoice {
+// RequestedToolPolicy 返回当前 RunContext 持有的工具使用策略，未设置时返回零值。
+func (r *RunContext) RequestedToolPolicy() ToolPolicy {
 	if r == nil {
-		return ToolChoice{}
+		return ToolPolicy{}
 	}
-	return r.toolChoice
+	return r.toolPolicy
+}
+
+func normalizeToolPolicy(policy ToolPolicy) ToolPolicy {
+	if len(policy.AllowedTools) == 0 {
+		if !policy.Required {
+			return ToolPolicy{}
+		}
+		return ToolPolicy{Required: true}
+	}
+
+	allowed := make([]tool.AgentTool, 0, len(policy.AllowedTools))
+	seen := make(map[tool.AgentTool]struct{}, len(policy.AllowedTools))
+	for _, name := range policy.AllowedTools {
+		if strings.TrimSpace(string(name)) == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		allowed = append(allowed, name)
+	}
+	if len(allowed) == 0 {
+		return ToolPolicy{}
+	}
+	return ToolPolicy{
+		Required:     policy.Required,
+		AllowedTools: allowed,
+	}
+}
+
+func (p ToolPolicy) Empty() bool {
+	return !p.Required && len(p.AllowedTools) == 0
 }
 
 func (r *RunContext) SetContextBlock(key string, title string, content string) {

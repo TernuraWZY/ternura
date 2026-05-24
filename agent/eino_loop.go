@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 
-	einomodel "github.com/cloudwego/eino/components/model"
-	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	einoreact "github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
+
+	"ternura/tool"
 )
 
 const einoReactMaxStep = 100
@@ -27,9 +28,11 @@ type einoAgentRun struct {
 	traceID int
 
 	mu                sync.Mutex
-	ignoredToolChoice ToolChoice
-	forcedToolChoices []ToolChoice
+	ignoredToolPolicy ToolPolicy
+	requiredPolicies  []ToolPolicy
 	observedMessages  map[string]struct{}
+	preparedModelCall bool
+	modelCallErr      error
 }
 
 func (a *Agent) newEinoAgentRun(ctx context.Context, runCtx *RunContext, result *AgentRunResult, emit func(AgentStreamEvent) error) (*einoAgentRun, error) {
@@ -44,17 +47,15 @@ func (a *Agent) newEinoAgentRun(ctx context.Context, runCtx *RunContext, result 
 		emit:             emit,
 		observedMessages: make(map[string]struct{}),
 	}
-
-	tools := make([]einotool.BaseTool, 0, len(a.tools))
-	for _, t := range a.tools {
-		tools = append(tools, t)
+	if err := runtime.beforeModelCall(ctx); err != nil {
+		return nil, err
 	}
+	runtime.preparedModelCall = true
+
+	tools := a.toolsForRun(runCtx)
 
 	reactAgent, err := einoreact.NewAgent(ctx, &einoreact.AgentConfig{
-		ToolCallingModel: &hookedChatModel{
-			base: a.chatModel,
-			run:  runtime,
-		},
+		ToolCallingModel: a.chatModel,
 		ToolsConfig: compose.ToolsNodeConfig{
 			Tools:               tools,
 			ExecuteSequentially: true,
@@ -66,6 +67,7 @@ func (a *Agent) newEinoAgentRun(ctx context.Context, runCtx *RunContext, result 
 			},
 		},
 		MaxStep:               einoReactMaxStep,
+		MessageModifier:       runtime.messageModifier,
 		StreamToolCallChecker: runtime.streamContainsToolCall,
 	})
 	if err != nil {
@@ -81,6 +83,9 @@ func (r *einoAgentRun) Generate(ctx context.Context) (*schema.Message, error) {
 	messageFutureOption, messageFuture := einoreact.WithMessageFuture()
 	message, err := r.react.Generate(ctx, cloneMessages(r.agent.messages), messageFutureOption)
 	if err != nil {
+		return nil, err
+	}
+	if err := r.modelCallError(); err != nil {
 		return nil, err
 	}
 	if err := r.collectGeneratedMessages(ctx, messageFuture); err != nil {
@@ -118,36 +123,105 @@ func (r *einoAgentRun) Stream(ctx context.Context) (*schema.Message, error) {
 	if err := <-messageObservationDone; err != nil {
 		return nil, err
 	}
+	if err := r.modelCallError(); err != nil {
+		return nil, err
+	}
 	return message, nil
 }
 
-func (r *einoAgentRun) RetryIgnoredToolChoice(ctx context.Context) bool {
+func (r *einoAgentRun) RetryIgnoredToolPolicy(ctx context.Context) bool {
 	r.mu.Lock()
-	forced := r.ignoredToolChoice
-	r.ignoredToolChoice = ToolChoice{}
+	policy := r.ignoredToolPolicy
+	r.ignoredToolPolicy = ToolPolicy{}
 	r.mu.Unlock()
 
-	return r.agent.retryIgnoredToolChoice(ctx, r.runCtx, forced)
+	return r.agent.retryIgnoredToolPolicy(ctx, r.runCtx, policy)
 }
 
-func (r *einoAgentRun) prepareModelCall(ctx context.Context, input []*schema.Message, opts []einomodel.Option) ([]*schema.Message, []einomodel.Option, error) {
-	r.runCtx.ModelCallCount++
+func (r *einoAgentRun) messageModifier(ctx context.Context, input []*schema.Message) []*schema.Message {
+	if !r.consumePreparedModelCall() {
+		if err := r.beforeModelCall(ctx); err != nil {
+			r.setModelCallError(err)
+			return input
+		}
+	}
+	return r.agent.messagesWithRuntimeContextForMessages(input, r.runCtx)
+}
+
+func (r *einoAgentRun) beforeModelCall(ctx context.Context) error {
+	if r.runCtx != nil {
+		r.runCtx.ModelCallCount++
+	}
 	if err := r.agent.hooks.BeforeModelCall(ctx, r.runCtx); err != nil {
-		return nil, nil, err
+		return err
 	}
 
-	forcedToolChoice := r.runCtx.RequestedToolChoice()
-	modelCall, err := r.agent.newModelCallWithMessages(ctx, r.runCtx, input)
-	if err != nil {
-		return nil, nil, err
+	_, available := r.agent.enabledToolsForRun(r.runCtx)
+	policy := effectiveToolPolicy(r.runCtx, available)
+	if policy.Empty() && r.runCtx != nil && !r.runCtx.RequestedToolPolicy().Empty() {
+		r.runCtx.ClearToolPolicy()
 	}
-	r.rememberForcedToolChoice(forcedToolChoice)
+	r.applyToolPolicyContext(policy)
+	r.rememberRequiredToolPolicy(policy)
+	return nil
+}
 
-	modelOptions := make([]einomodel.Option, 0, len(opts)+len(modelCall.Options)+1)
-	modelOptions = append(modelOptions, opts...)
-	modelOptions = append(modelOptions, einomodel.WithTools(modelCall.Tools))
-	modelOptions = append(modelOptions, modelCall.Options...)
-	return modelCall.Messages, modelOptions, nil
+func (r *einoAgentRun) applyToolPolicyContext(policy ToolPolicy) {
+	if r.runCtx == nil {
+		return
+	}
+	r.runCtx.SetContextBlock("tool-policy", "Tool Policy", toolPolicyGuidance(policy))
+}
+
+func toolPolicyGuidance(policy ToolPolicy) string {
+	if policy.Empty() {
+		return ""
+	}
+	if policy.Required && len(policy.AllowedTools) == 1 {
+		return fmt.Sprintf("The next assistant response must call the %s tool before giving a final answer.", policy.AllowedTools[0])
+	}
+	if policy.Required && len(policy.AllowedTools) > 1 {
+		return fmt.Sprintf("The next assistant response must call one of these tools before giving a final answer: %s.", joinToolNames(policy.AllowedTools))
+	}
+	if policy.Required {
+		return "The next assistant response must call one of the available tools before giving a final answer."
+	}
+	return fmt.Sprintf("If a tool is needed, use only these tools: %s.", joinToolNames(policy.AllowedTools))
+}
+
+func joinToolNames(names []tool.AgentTool) string {
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, string(name))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (r *einoAgentRun) consumePreparedModelCall() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.preparedModelCall {
+		return false
+	}
+	r.preparedModelCall = false
+	return true
+}
+
+func (r *einoAgentRun) setModelCallError(err error) {
+	if err == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.modelCallErr == nil {
+		r.modelCallErr = err
+	}
+}
+
+func (r *einoAgentRun) modelCallError() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.modelCallErr
 }
 
 func (r *einoAgentRun) collectGeneratedMessages(ctx context.Context, future einoreact.MessageFuture) error {
@@ -285,15 +359,15 @@ func observedMessageKey(message *schema.Message) string {
 }
 
 func (r *einoAgentRun) recordAssistantMessage(ctx context.Context, message *schema.Message) error {
-	forced := r.nextForcedToolChoice()
+	policy := r.nextRequiredToolPolicy()
 
 	r.mu.Lock()
 	r.agent.messages = append(r.agent.messages, message)
 	if r.emit == nil {
 		appendThinkTrace(r.result, message.Content)
 	}
-	if len(message.ToolCalls) == 0 && forced.Mode != "" {
-		r.ignoredToolChoice = forced
+	if len(message.ToolCalls) == 0 && policy.Required {
+		r.ignoredToolPolicy = policy
 	}
 	r.mu.Unlock()
 
@@ -301,7 +375,7 @@ func (r *einoAgentRun) recordAssistantMessage(ctx context.Context, message *sche
 		return err
 	}
 	if len(message.ToolCalls) > 0 {
-		r.runCtx.ClearToolChoice()
+		r.runCtx.ClearToolPolicy()
 	}
 	return nil
 }
@@ -414,27 +488,27 @@ func (r *einoAgentRun) recordToolTrace(toolResult ToolResult) error {
 	return nil
 }
 
-func (r *einoAgentRun) rememberForcedToolChoice(choice ToolChoice) {
+func (r *einoAgentRun) rememberRequiredToolPolicy(policy ToolPolicy) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.forcedToolChoices = append(r.forcedToolChoices, choice)
+	r.requiredPolicies = append(r.requiredPolicies, policy)
 }
 
-func (r *einoAgentRun) nextForcedToolChoice() ToolChoice {
+func (r *einoAgentRun) nextRequiredToolPolicy() ToolPolicy {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.forcedToolChoices) == 0 {
-		return ToolChoice{}
+	if len(r.requiredPolicies) == 0 {
+		return ToolPolicy{}
 	}
-	choice := r.forcedToolChoices[0]
-	r.forcedToolChoices = r.forcedToolChoices[1:]
-	return choice
+	policy := r.requiredPolicies[0]
+	r.requiredPolicies = r.requiredPolicies[1:]
+	return policy
 }
 
 func (r *einoAgentRun) streamContainsToolCall(ctx context.Context, stream *schema.StreamReader[*schema.Message]) (bool, error) {
 	containsToolCall, err := streamContainsToolCall(ctx, stream)
 	if containsToolCall {
-		r.runCtx.ClearToolChoice()
+		r.runCtx.ClearToolPolicy()
 	}
 	return containsToolCall, err
 }
@@ -444,43 +518,6 @@ func (r *einoAgentRun) newTraceID() string {
 	defer r.mu.Unlock()
 	r.traceID++
 	return fmt.Sprintf("trace-%d", r.traceID)
-}
-
-type hookedChatModel struct {
-	base einomodel.BaseChatModel
-	run  *einoAgentRun
-}
-
-func (m *hookedChatModel) WithTools(_ []*schema.ToolInfo) (einomodel.ToolCallingChatModel, error) {
-	return m, nil
-}
-
-func (m *hookedChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
-	modelInput, modelOptions, err := m.run.prepareModelCall(ctx, input, opts)
-	if err != nil {
-		return nil, err
-	}
-
-	message, err := m.base.Generate(ctx, modelInput, modelOptions...)
-	if err != nil {
-		log.Printf("failed to send a new completion request: %v", err)
-		return nil, err
-	}
-	return message, nil
-}
-
-func (m *hookedChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
-	modelInput, modelOptions, err := m.run.prepareModelCall(ctx, input, opts)
-	if err != nil {
-		return nil, err
-	}
-
-	source, err := m.base.Stream(ctx, modelInput, modelOptions...)
-	if err != nil {
-		log.Printf("failed to stream completion request: %v", err)
-		return nil, err
-	}
-	return source, nil
 }
 
 func streamContainsToolCall(_ context.Context, stream *schema.StreamReader[*schema.Message]) (bool, error) {

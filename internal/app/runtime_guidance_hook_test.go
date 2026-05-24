@@ -74,8 +74,8 @@ func TestScheduleGuidanceHookTreatsCronRuntimeAsExecution(t *testing.T) {
 	if strings.Contains(rendered, "Creating the schedule") {
 		t.Fatalf("cron runtime should not receive create-schedule guidance:\n%s", rendered)
 	}
-	if choice := run.RequestedToolChoice(); choice.Mode != "" {
-		t.Fatalf("cron runtime should not force schedule tool choice, got %+v", choice)
+	if policy := run.RequestedToolPolicy(); !policy.Empty() {
+		t.Fatalf("cron runtime should not require schedule tool, got %+v", policy)
 	}
 }
 
@@ -109,7 +109,7 @@ func TestScheduleGuidanceHookIgnoresOrdinaryFutureQuestion(t *testing.T) {
 	}
 }
 
-func TestScheduleGuidanceHookForcesScheduleToolOnStrongIntent(t *testing.T) {
+func TestScheduleGuidanceHookRequiresScheduleToolOnStrongIntent(t *testing.T) {
 	run := agent.NewRunContext("2分钟后提醒我喝水", agent.RunModeSync)
 	run.ModelCallCount = 1
 
@@ -117,13 +117,13 @@ func TestScheduleGuidanceHookForcesScheduleToolOnStrongIntent(t *testing.T) {
 		t.Fatalf("before model call: %v", err)
 	}
 
-	choice := run.RequestedToolChoice()
-	if choice.Mode != agent.ToolChoiceSpecific || choice.Name != tool.AgentToolCron {
-		t.Fatalf("expected cron forced, got %+v", choice)
+	policy := run.RequestedToolPolicy()
+	if !policy.Required || len(policy.AllowedTools) != 1 || policy.AllowedTools[0] != tool.AgentToolCron {
+		t.Fatalf("expected cron required, got %+v", policy)
 	}
 }
 
-func TestScheduleGuidanceHookForcesCancelToolWhenIDPresent(t *testing.T) {
+func TestScheduleGuidanceHookRequiresCancelToolWhenIDPresent(t *testing.T) {
 	run := agent.NewRunContext("帮我取消 schedule-20260520T120000 这个提醒", agent.RunModeSync)
 	run.ModelCallCount = 1
 
@@ -131,9 +131,9 @@ func TestScheduleGuidanceHookForcesCancelToolWhenIDPresent(t *testing.T) {
 		t.Fatalf("before model call: %v", err)
 	}
 
-	choice := run.RequestedToolChoice()
-	if choice.Mode != agent.ToolChoiceSpecific || choice.Name != tool.AgentToolCron {
-		t.Fatalf("expected cron forced for cancel with id, got %+v", choice)
+	policy := run.RequestedToolPolicy()
+	if !policy.Required || len(policy.AllowedTools) != 1 || policy.AllowedTools[0] != tool.AgentToolCron {
+		t.Fatalf("expected cron required for cancel with id, got %+v", policy)
 	}
 }
 
@@ -145,8 +145,8 @@ func TestScheduleGuidanceHookDoesNotForceCancelWithoutID(t *testing.T) {
 		t.Fatalf("before model call: %v", err)
 	}
 
-	if choice := run.RequestedToolChoice(); choice.Mode != "" {
-		t.Fatalf("cancel without id should not force tool choice, got %+v", choice)
+	if policy := run.RequestedToolPolicy(); !policy.Empty() {
+		t.Fatalf("cancel without id should not require tool, got %+v", policy)
 	}
 	if rendered := run.RuntimeContextText(); !strings.Contains(rendered, "action=remove") {
 		t.Fatalf("cancel guidance text should still be injected:\n%s", rendered)
@@ -170,8 +170,8 @@ func TestScheduleGuidanceHookDoesNotForceToolOnPureChatRequest(t *testing.T) {
 				t.Fatalf("before model call: %v", err)
 			}
 
-			if choice := run.RequestedToolChoice(); choice.Mode != "" {
-				t.Fatalf("query %q should not force tool choice, got %+v", query, choice)
+			if policy := run.RequestedToolPolicy(); !policy.Empty() {
+				t.Fatalf("query %q should not require tool, got %+v", query, policy)
 			}
 		})
 	}
@@ -185,8 +185,8 @@ func TestScheduleGuidanceHookDoesNotForceToolAfterFirstModelCall(t *testing.T) {
 		t.Fatalf("before model call: %v", err)
 	}
 
-	if choice := run.RequestedToolChoice(); choice.Mode != "" {
-		t.Fatalf("subsequent model calls should not be forced, got %+v", choice)
+	if policy := run.RequestedToolPolicy(); !policy.Empty() {
+		t.Fatalf("subsequent model calls should not require tool, got %+v", policy)
 	}
 }
 
@@ -284,8 +284,8 @@ func TestScheduleGuidanceHookAddsVagueTimingGuidance(t *testing.T) {
 			t.Fatalf("vague guidance missing %q:\n%s", want, rendered)
 		}
 	}
-	if choice := run.RequestedToolChoice(); choice.Mode != "" {
-		t.Fatalf("vague timing should not force tool choice, got %+v", choice)
+	if policy := run.RequestedToolPolicy(); !policy.Empty() {
+		t.Fatalf("vague timing should not require tool, got %+v", policy)
 	}
 }
 

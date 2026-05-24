@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
 	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	einomodel "github.com/cloudwego/eino/components/model"
+	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 
 	"ternura/config"
@@ -20,7 +22,7 @@ import (
 type Agent struct {
 	systemPrompt string
 	model        string
-	chatModel    einomodel.BaseChatModel
+	chatModel    einomodel.ToolCallingChatModel
 	messages     []*schema.Message
 	tools        map[tool.AgentTool]tool.Tool
 	hooks        *HookManager
@@ -172,7 +174,7 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 		if message == nil {
 			return result, nil
 		}
-		if runtime.RetryIgnoredToolChoice(ctx) {
+		if runtime.RetryIgnoredToolPolicy(ctx) {
 			continue
 		}
 		result.RawContent = message.Content
@@ -217,7 +219,7 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 		if message == nil {
 			return result, nil
 		}
-		if runtime.RetryIgnoredToolChoice(ctx) {
+		if runtime.RetryIgnoredToolPolicy(ctx) {
 			continue
 		}
 		result.Content = strings.TrimSpace(result.Content)
@@ -236,74 +238,72 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 	}
 }
 
-type modelCallRequest struct {
-	Messages []*schema.Message
-	Tools    []*schema.ToolInfo
-	Options  []einomodel.Option
+func (a *Agent) messagesWithRuntimeContext(runCtx *RunContext) []*schema.Message {
+	return a.messagesWithRuntimeContextForMessages(a.messages, runCtx)
 }
 
-func (a *Agent) newModelCall(ctx context.Context, runCtx *RunContext) (modelCallRequest, error) {
-	return a.newModelCallWithMessages(ctx, runCtx, a.messages)
-}
-
-func (a *Agent) newModelCallWithMessages(ctx context.Context, runCtx *RunContext, messages []*schema.Message) (modelCallRequest, error) {
-	req := modelCallRequest{
-		Messages: a.messagesWithRuntimeContextForMessages(messages, runCtx),
-		Tools:    make([]*schema.ToolInfo, 0),
-		Options:  make([]einomodel.Option, 0),
+func (a *Agent) toolsForRun(runCtx *RunContext) []einotool.BaseTool {
+	tools, available := a.enabledToolsForRun(runCtx)
+	policy := effectiveToolPolicy(runCtx, available)
+	if len(policy.AllowedTools) > 0 {
+		filtered := make([]einotool.BaseTool, 0, len(policy.AllowedTools))
+		for _, name := range policy.AllowedTools {
+			filtered = append(filtered, available[name])
+		}
+		return filtered
 	}
+	return tools
+}
 
-	availableTools := make(map[tool.AgentTool]*schema.ToolInfo)
-	for _, t := range a.tools {
+func (a *Agent) enabledToolsForRun(runCtx *RunContext) ([]einotool.BaseTool, map[tool.AgentTool]einotool.BaseTool) {
+	names := make([]string, 0, len(a.tools))
+	for name := range a.tools {
+		names = append(names, string(name))
+	}
+	sort.Strings(names)
+
+	tools := make([]einotool.BaseTool, 0, len(names))
+	available := make(map[tool.AgentTool]einotool.BaseTool, len(names))
+	for _, rawName := range names {
+		name := tool.AgentTool(rawName)
 		if runCtx != nil {
-			if _, disabled := runCtx.ToolDisabled(t.ToolName()); disabled {
+			if _, disabled := runCtx.ToolDisabled(name); disabled {
 				continue
 			}
 		}
-		info, err := t.Info(ctx)
-		if err != nil {
-			return req, err
-		}
-		if info == nil {
-			return req, fmt.Errorf("tool %s returned nil info", t.ToolName())
-		}
-		req.Tools = append(req.Tools, info)
-		availableTools[t.ToolName()] = info
+		t := a.tools[name]
+		tools = append(tools, t)
+		available[name] = t
 	}
-
-	req.Tools, req.Options = resolveToolChoice(runCtx, req.Tools, availableTools)
-	if len(req.Tools) > 0 {
-		req.Options = append([]einomodel.Option{einomodel.WithTools(req.Tools)}, req.Options...)
-	}
-	return req, nil
+	return tools, available
 }
 
-// resolveToolChoice 把 RunContext 上的 ToolChoice 翻译成 Eino model options。
-// 当目标工具不可用或不在本轮工具集时，会自动降级为不设置（等价 auto），避免请求被服务端拒绝。
-func resolveToolChoice(runCtx *RunContext, tools []*schema.ToolInfo, available map[tool.AgentTool]*schema.ToolInfo) ([]*schema.ToolInfo, []einomodel.Option) {
+func effectiveToolPolicy(runCtx *RunContext, available map[tool.AgentTool]einotool.BaseTool) ToolPolicy {
 	if runCtx == nil {
-		return tools, nil
+		return ToolPolicy{}
 	}
-	choice := runCtx.RequestedToolChoice()
-	switch choice.Mode {
-	case ToolChoiceRequired:
-		if len(tools) == 0 {
-			return tools, nil
-		}
-		return tools, []einomodel.Option{einomodel.WithToolChoice(schema.ToolChoiceForced)}
-	case ToolChoiceSpecific:
-		info, ok := available[choice.Name]
-		if !ok {
-			return tools, nil
-		}
-		return []*schema.ToolInfo{info}, []einomodel.Option{einomodel.WithToolChoice(schema.ToolChoiceForced)}
-	default:
-		return tools, nil
+	policy := runCtx.RequestedToolPolicy()
+	if policy.Empty() {
+		return ToolPolicy{}
 	}
-}
+	if len(policy.AllowedTools) == 0 {
+		if policy.Required && len(available) == 0 {
+			return ToolPolicy{}
+		}
+		return policy
+	}
 
-func (a *Agent) messagesWithRuntimeContext(runCtx *RunContext) []*schema.Message {
-	return a.messagesWithRuntimeContextForMessages(a.messages, runCtx)
+	allowed := make([]tool.AgentTool, 0, len(policy.AllowedTools))
+	for _, name := range policy.AllowedTools {
+		if _, ok := available[name]; ok {
+			allowed = append(allowed, name)
+		}
+	}
+	if len(allowed) == 0 {
+		return ToolPolicy{}
+	}
+	policy.AllowedTools = allowed
+	return policy
 }
 
 func (a *Agent) messagesWithRuntimeContextForMessages(input []*schema.Message, runCtx *RunContext) []*schema.Message {
@@ -598,23 +598,23 @@ func lastCompleteUTF8Boundary(content string, limit int) int {
 	return limit
 }
 
-const ignoredToolChoiceRetryKey = "ignored_tool_choice_retry"
+const ignoredToolPolicyRetryKey = "ignored_tool_policy_retry"
 
-// retryIgnoredToolChoice 在模型无视强制 tool_choice 直接文本回复时，追加一次 nudge 并重试。
-func (a *Agent) retryIgnoredToolChoice(_ context.Context, runCtx *RunContext, forced ToolChoice) bool {
-	if runCtx == nil || forced.Mode == "" {
+// retryIgnoredToolPolicy 在模型无视 Required 工具策略直接文本回复时，追加一次 nudge 并重试。
+func (a *Agent) retryIgnoredToolPolicy(_ context.Context, runCtx *RunContext, policy ToolPolicy) bool {
+	if runCtx == nil || !policy.Required {
 		return false
 	}
 	if runCtx.Metadata != nil {
-		if retried, ok := runCtx.Metadata[ignoredToolChoiceRetryKey].(bool); ok && retried {
+		if retried, ok := runCtx.Metadata[ignoredToolPolicyRetryKey].(bool); ok && retried {
 			return false
 		}
 	}
 	if runCtx.Metadata == nil {
 		runCtx.Metadata = make(map[string]any)
 	}
-	runCtx.Metadata[ignoredToolChoiceRetryKey] = true
-	runCtx.SetToolChoice(forced)
+	runCtx.Metadata[ignoredToolPolicyRetryKey] = true
+	runCtx.SetToolPolicy(policy)
 	a.messages = append(a.messages, schema.UserMessage(
 		"You must call the required tool before claiming the action succeeded. Call it now with valid arguments.",
 	))
