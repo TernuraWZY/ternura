@@ -59,3 +59,75 @@ func TestContextBuilderBuildMergesRuntimeContextIntoSystemMessage(t *testing.T) 
 		t.Fatalf("system prompt should appear once:\n%s", messages[0].Content)
 	}
 }
+
+func TestContextBuilderBuildDropsHistoricalToolExchangeBeforeLatestUser(t *testing.T) {
+	oldToolCall := schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "old-call",
+		Function: schema.FunctionCall{
+			Name:      "read",
+			Arguments: `{"path":"old.txt"}`,
+		},
+	}})
+	currentToolCall := schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "current-call",
+		Function: schema.FunctionCall{
+			Name:      "read",
+			Arguments: `{"path":"current.txt"}`,
+		},
+	}})
+	input := []*schema.Message{
+		schema.SystemMessage("system"),
+		schema.UserMessage("old question"),
+		oldToolCall,
+		schema.ToolMessage("old huge output", "old-call", schema.WithToolName("read")),
+		schema.AssistantMessage("old final answer", nil),
+		schema.UserMessage("current question"),
+		currentToolCall,
+		schema.ToolMessage("current output", "current-call", schema.WithToolName("read")),
+	}
+	builder := NewContextBuilder("system")
+
+	messages, err := builder.Build(context.Background(), nil, input)
+
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	if hasAssistantToolCall(messages, "old-call") {
+		t.Fatalf("historical assistant tool call should be dropped: %+v", messages)
+	}
+	if containsToolMessage(messages, "old-call", "old huge output") {
+		t.Fatalf("historical tool result should be dropped: %+v", messages)
+	}
+	if !containsAssistantContent(messages, "old final answer") {
+		t.Fatalf("historical final assistant answer should be kept: %+v", messages)
+	}
+	if !hasAssistantToolCall(messages, "current-call") {
+		t.Fatalf("current run assistant tool call should be kept: %+v", messages)
+	}
+	if !containsToolMessage(messages, "current-call", "current output") {
+		t.Fatalf("current run tool result should be kept: %+v", messages)
+	}
+}
+
+func hasAssistantToolCall(messages []*schema.Message, callID string) bool {
+	for _, message := range messages {
+		if message == nil || message.Role != schema.Assistant {
+			continue
+		}
+		for _, call := range message.ToolCalls {
+			if call.ID == callID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsAssistantContent(messages []*schema.Message, content string) bool {
+	for _, message := range messages {
+		if message != nil && message.Role == schema.Assistant && message.Content == content {
+			return true
+		}
+	}
+	return false
+}
