@@ -86,7 +86,11 @@ func (a *Agent) newEinoAgentRun(ctx context.Context, runCtx *RunContext, result 
 
 func (r *einoAgentRun) Generate(ctx context.Context) (*schema.Message, error) {
 	log.Printf("calling Eino ReAct agent with model %s...", r.agent.model)
-	message, err := r.react.Generate(ctx, cloneMessages(r.agent.messages), r.traceCallbackOption())
+	messages, err := r.buildModelMessages(ctx, r.agent.messages)
+	if err != nil {
+		return nil, err
+	}
+	message, err := r.react.Generate(ctx, messages, r.traceCallbackOption())
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +108,11 @@ func (r *einoAgentRun) Stream(ctx context.Context) (*schema.Message, error) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	stream, err := r.react.Stream(streamCtx, cloneMessages(r.agent.messages), r.traceCallbackOption())
+	messages, err := r.buildModelMessages(ctx, r.agent.messages)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := r.react.Stream(streamCtx, messages, r.traceCallbackOption())
 	if err != nil {
 		log.Printf("failed to stream Eino ReAct agent: %v", err)
 		return nil, err
@@ -144,7 +152,20 @@ func (r *einoAgentRun) messageModifier(ctx context.Context, input []*schema.Mess
 			return input
 		}
 	}
-	return r.agent.messagesWithRuntimeContextForMessages(input, r.runCtx)
+	messages, err := r.buildModelMessages(ctx, input)
+	if err != nil {
+		r.setModelCallError(err)
+		return input
+	}
+	return messages
+}
+
+func (r *einoAgentRun) buildModelMessages(ctx context.Context, input []*schema.Message) ([]*schema.Message, error) {
+	builder := r.agent.contextBuilder
+	if builder == nil {
+		builder = NewContextBuilder(r.agent.systemPrompt)
+	}
+	return builder.Build(ctx, r.runCtx, input)
 }
 
 func (r *einoAgentRun) beforeModelCall(ctx context.Context) error {
@@ -386,6 +407,7 @@ func (r *einoAgentRun) toolCallMiddleware() compose.ToolMiddleware {
 						Content: err.Error(),
 						Err:     err,
 					}
+					toolResult = limitToolResult(toolResult)
 					r.rememberToolResult(toolResult)
 					if r.runCtx != nil {
 						r.runCtx.recordToolResult(toolResult)
@@ -411,6 +433,7 @@ func (r *einoAgentRun) toolCallMiddleware() compose.ToolMiddleware {
 					toolResult.Err = err
 					toolResult.Content = err.Error()
 				}
+				toolResult = limitToolResult(toolResult)
 				r.rememberToolResult(toolResult)
 				if r.runCtx != nil {
 					r.runCtx.recordToolResult(toolResult)
@@ -496,13 +519,4 @@ func streamContainsToolCall(_ context.Context, stream *schema.StreamReader[*sche
 			return true, nil
 		}
 	}
-}
-
-func cloneMessages(messages []*schema.Message) []*schema.Message {
-	if len(messages) == 0 {
-		return nil
-	}
-	cloned := make([]*schema.Message, len(messages))
-	copy(cloned, messages)
-	return cloned
 }

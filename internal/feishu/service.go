@@ -13,30 +13,36 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	defaultBaseURL      = "https://open.feishu.cn"
-	defaultGroupPolicy  = "mention"
-	defaultMaxEventSize = 1 << 20
+	defaultBaseURL            = "https://open.feishu.cn"
+	defaultGroupPolicy        = "mention"
+	defaultMaxEventSize       = 1 << 20
+	defaultProcessingReaction = "OneSecond"
+	defaultProcessingDelay    = time.Second
 )
 
 type Config struct {
-	Enabled           bool
-	AppID             string
-	AppSecret         string
-	VerificationToken string
-	BaseURL           string
-	BotOpenID         string
-	GroupPolicy       string
-	EventMode         string
-	ReplyToMessage    bool
-	TopicIsolation    bool
-	AllowOpenIDs      []string
-	HTTPClient        *http.Client
+	Enabled                bool
+	AppID                  string
+	AppSecret              string
+	VerificationToken      string
+	BaseURL                string
+	BotOpenID              string
+	GroupPolicy            string
+	EventMode              string
+	ReplyToMessage         bool
+	TopicIsolation         bool
+	ProcessingReaction     bool
+	ProcessingReactionType string
+	ProcessingDelay        time.Duration
+	AllowOpenIDs           []string
+	HTTPClient             *http.Client
 }
 
 type InboundMessage struct {
@@ -93,17 +99,20 @@ type tenantToken struct {
 
 func NewConfigFromEnv() Config {
 	return Config{
-		Enabled:           envBool("FEISHU_ENABLED", false),
-		AppID:             strings.TrimSpace(os.Getenv("FEISHU_APP_ID")),
-		AppSecret:         strings.TrimSpace(os.Getenv("FEISHU_APP_SECRET")),
-		VerificationToken: strings.TrimSpace(os.Getenv("FEISHU_VERIFICATION_TOKEN")),
-		BaseURL:           envDefault("FEISHU_BASE_URL", defaultBaseURL),
-		BotOpenID:         strings.TrimSpace(os.Getenv("FEISHU_BOT_OPEN_ID")),
-		GroupPolicy:       envDefault("FEISHU_GROUP_POLICY", defaultGroupPolicy),
-		EventMode:         envDefault("FEISHU_EVENT_MODE", "websocket"),
-		ReplyToMessage:    envBool("FEISHU_REPLY_TO_MESSAGE", true),
-		TopicIsolation:    envBool("FEISHU_TOPIC_ISOLATION", true),
-		AllowOpenIDs:      splitCSV(os.Getenv("FEISHU_ALLOW_OPEN_IDS")),
+		Enabled:                envBool("FEISHU_ENABLED", false),
+		AppID:                  strings.TrimSpace(os.Getenv("FEISHU_APP_ID")),
+		AppSecret:              strings.TrimSpace(os.Getenv("FEISHU_APP_SECRET")),
+		VerificationToken:      strings.TrimSpace(os.Getenv("FEISHU_VERIFICATION_TOKEN")),
+		BaseURL:                envDefault("FEISHU_BASE_URL", defaultBaseURL),
+		BotOpenID:              strings.TrimSpace(os.Getenv("FEISHU_BOT_OPEN_ID")),
+		GroupPolicy:            envDefault("FEISHU_GROUP_POLICY", defaultGroupPolicy),
+		EventMode:              envDefault("FEISHU_EVENT_MODE", "websocket"),
+		ReplyToMessage:         envBool("FEISHU_REPLY_TO_MESSAGE", true),
+		TopicIsolation:         envBool("FEISHU_TOPIC_ISOLATION", true),
+		ProcessingReaction:     envBool("FEISHU_PROCESSING_REACTION", true),
+		ProcessingReactionType: envDefault("FEISHU_PROCESSING_REACTION_TYPE", defaultProcessingReaction),
+		ProcessingDelay:        envDuration("FEISHU_PROCESSING_DELAY", defaultProcessingDelay),
+		AllowOpenIDs:           splitCSV(os.Getenv("FEISHU_ALLOW_OPEN_IDS")),
 	}
 }
 
@@ -185,7 +194,7 @@ func (s *Service) process(ctx context.Context, inbound InboundMessage) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
-	replyMessage, err := s.handle(ctx, inbound)
+	replyMessage, err := s.handleWithProcessingReaction(ctx, inbound)
 	if err != nil {
 		log.Printf("feishu agent turn failed for %s: %v", inbound.MessageID, err)
 		replyMessage = Reply{Content: "处理失败：" + err.Error()}
@@ -194,7 +203,6 @@ func (s *Service) process(ctx context.Context, inbound InboundMessage) {
 		return
 	}
 
-	reply := s.cfg.ReplyToMessage || strings.TrimSpace(inbound.ThreadID) != ""
 	if err := s.Send(ctx, OutboundMessage{
 		ReceiveIDType: inbound.ReceiveIDType,
 		ReceiveID:     inbound.ReceiveID,
@@ -202,10 +210,75 @@ func (s *Service) process(ctx context.Context, inbound InboundMessage) {
 		ThreadID:      inbound.ThreadID,
 		Content:       replyMessage.Content,
 		Card:          replyMessage.Card,
-		Reply:         reply,
+		Reply:         s.shouldReplyToInbound(inbound),
 	}); err != nil {
 		log.Printf("feishu send reply failed for %s: %v", inbound.MessageID, err)
 	}
+}
+
+type handlerResult struct {
+	reply Reply
+	err   error
+}
+
+func (s *Service) handleWithProcessingReaction(ctx context.Context, inbound InboundMessage) (Reply, error) {
+	if !s.processingReactionEnabled() {
+		return s.handle(ctx, inbound)
+	}
+
+	resultCh := make(chan handlerResult, 1)
+	go func() {
+		reply, err := s.handle(ctx, inbound)
+		resultCh <- handlerResult{reply: reply, err: err}
+	}()
+
+	delay := s.cfg.ProcessingDelay
+	if delay <= 0 {
+		s.addProcessingReaction(ctx, inbound)
+		return waitForHandlerResult(ctx, resultCh)
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case result := <-resultCh:
+		return result.reply, result.err
+	case <-timer.C:
+		s.addProcessingReaction(ctx, inbound)
+		return waitForHandlerResult(ctx, resultCh)
+	case <-ctx.Done():
+		return Reply{}, ctx.Err()
+	}
+}
+
+func waitForHandlerResult(ctx context.Context, resultCh <-chan handlerResult) (Reply, error) {
+	select {
+	case result := <-resultCh:
+		return result.reply, result.err
+	case <-ctx.Done():
+		return Reply{}, ctx.Err()
+	}
+}
+
+func (s *Service) processingReactionEnabled() bool {
+	return s.cfg.ProcessingReaction &&
+		s.cfg.ProcessingDelay >= 0 &&
+		strings.TrimSpace(s.cfg.ProcessingReactionType) != ""
+}
+
+func (s *Service) addProcessingReaction(ctx context.Context, inbound InboundMessage) {
+	reactionType := strings.TrimSpace(s.cfg.ProcessingReactionType)
+	if reactionType == "" || strings.TrimSpace(inbound.MessageID) == "" {
+		return
+	}
+	if err := s.AddReaction(ctx, inbound.MessageID, reactionType); err != nil {
+		log.Printf("feishu add processing reaction failed for %s: %v", inbound.MessageID, err)
+	}
+}
+
+func (s *Service) shouldReplyToInbound(inbound InboundMessage) bool {
+	return s.cfg.ReplyToMessage || strings.TrimSpace(inbound.ThreadID) != ""
 }
 
 func (s *Service) Send(ctx context.Context, out OutboundMessage) error {
@@ -240,6 +313,20 @@ func (s *Service) Send(ctx context.Context, out OutboundMessage) error {
 		"content":    content,
 	}
 	return s.postOpenAPI(ctx, "/open-apis/im/v1/messages", "receive_id_type="+url.QueryEscape(receiveIDType), createPayload, nil)
+}
+
+func (s *Service) AddReaction(ctx context.Context, messageID string, reactionType string) error {
+	messageID = strings.TrimSpace(messageID)
+	reactionType = strings.TrimSpace(reactionType)
+	if messageID == "" || reactionType == "" {
+		return nil
+	}
+	payload := map[string]any{
+		"reaction_type": map[string]string{
+			"emoji_type": reactionType,
+		},
+	}
+	return s.postOpenAPI(ctx, "/open-apis/im/v1/messages/"+url.PathEscape(messageID)+"/reactions", "", payload, nil)
 }
 
 func (s *Service) decodeIncoming(body []byte) (string, *InboundMessage, error) {
@@ -528,6 +615,22 @@ func envBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	duration, err := time.ParseDuration(value)
+	if err == nil {
+		return duration
+	}
+	seconds, err := strconv.Atoi(value)
+	if err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	return fallback
 }
 
 func splitCSV(value string) []string {

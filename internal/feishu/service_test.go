@@ -1,11 +1,15 @@
 package feishu
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -179,6 +183,160 @@ func TestSessionIDForKeyIsDeterministic(t *testing.T) {
 	}
 	if !strings.HasPrefix(first, "feishu-") {
 		t.Fatalf("session id = %q", first)
+	}
+}
+
+type sentRequest struct {
+	path string
+	body string
+}
+
+func TestProcessAddsProcessingReactionWhenHandlerIsSlow(t *testing.T) {
+	var mu sync.Mutex
+	sent := make([]sentRequest, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"code":                0,
+				"tenant_access_token": "tenant-token",
+				"expire":              3600,
+			})
+		case "/open-apis/im/v1/messages/om_slow/reactions", "/open-apis/im/v1/messages/om_slow/reply":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read body: %v", err)
+			}
+			mu.Lock()
+			sent = append(sent, sentRequest{path: r.URL.Path, body: string(body)})
+			mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handlerStarted := make(chan struct{})
+	finishHandler := make(chan struct{})
+	done := make(chan struct{})
+	service := NewService(Config{
+		Enabled:                true,
+		AppID:                  "cli_xxx",
+		AppSecret:              "secret",
+		BaseURL:                server.URL,
+		ReplyToMessage:         true,
+		ProcessingReaction:     true,
+		ProcessingReactionType: "THUMBSUP",
+		ProcessingDelay:        10 * time.Millisecond,
+	}, func(ctx context.Context, msg InboundMessage) (Reply, error) {
+		close(handlerStarted)
+		<-finishHandler
+		return Reply{Content: "处理完成"}, nil
+	})
+
+	go func() {
+		defer close(done)
+		service.process(context.Background(), InboundMessage{
+			MessageID:     "om_slow",
+			ReceiveIDType: "chat_id",
+			ReceiveID:     "oc_group",
+		})
+	}()
+
+	<-handlerStarted
+	waitForSentMessages(t, &mu, &sent, 1)
+	close(finishHandler)
+	<-done
+
+	waitForSentMessages(t, &mu, &sent, 2)
+	if sent[0].path != "/open-apis/im/v1/messages/om_slow/reactions" {
+		t.Fatalf("first request should add reaction, got %s", sent[0].path)
+	}
+	if !strings.Contains(sent[0].body, `"emoji_type":"THUMBSUP"`) {
+		t.Fatalf("reaction request missing emoji type, got %s", sent[0].body)
+	}
+	if sent[1].path != "/open-apis/im/v1/messages/om_slow/reply" {
+		t.Fatalf("second request should be final reply, got %s", sent[1].path)
+	}
+	if !strings.Contains(sent[1].body, "处理完成") {
+		t.Fatalf("second message should be final reply, got %s", sent[1].body)
+	}
+}
+
+func TestProcessSkipsProcessingReactionWhenHandlerIsFast(t *testing.T) {
+	var mu sync.Mutex
+	sent := make([]sentRequest, 0, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"code":                0,
+				"tenant_access_token": "tenant-token",
+				"expire":              3600,
+			})
+		case "/open-apis/im/v1/messages/om_fast/reply":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read body: %v", err)
+			}
+			mu.Lock()
+			sent = append(sent, sentRequest{path: r.URL.Path, body: string(body)})
+			mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := NewService(Config{
+		Enabled:                true,
+		AppID:                  "cli_xxx",
+		AppSecret:              "secret",
+		BaseURL:                server.URL,
+		ReplyToMessage:         true,
+		ProcessingReaction:     true,
+		ProcessingReactionType: "THUMBSUP",
+		ProcessingDelay:        time.Second,
+	}, func(ctx context.Context, msg InboundMessage) (Reply, error) {
+		return Reply{Content: "马上完成"}, nil
+	})
+
+	service.process(context.Background(), InboundMessage{
+		MessageID:     "om_fast",
+		ReceiveIDType: "chat_id",
+		ReceiveID:     "oc_group",
+	})
+
+	waitForSentMessages(t, &mu, &sent, 1)
+	if sent[0].path != "/open-apis/im/v1/messages/om_fast/reply" {
+		t.Fatalf("fast handler should only send final reply, got %s", sent[0].path)
+	}
+	if !strings.Contains(sent[0].body, "马上完成") {
+		t.Fatalf("final reply missing, got %s", sent[0].body)
+	}
+}
+
+func waitForSentMessages(t *testing.T, mu *sync.Mutex, sent *[]sentRequest, count int) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		mu.Lock()
+		got := len(*sent)
+		mu.Unlock()
+		if got >= count {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("sent message count = %d, want at least %d", got, count)
+		case <-ticker.C:
+		}
 	}
 }
 

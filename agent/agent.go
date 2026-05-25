@@ -20,12 +20,13 @@ import (
 )
 
 type Agent struct {
-	systemPrompt string
-	model        string
-	chatModel    einomodel.ToolCallingChatModel
-	messages     []*schema.Message
-	tools        map[tool.AgentTool]tool.Tool
-	hooks        *HookManager
+	systemPrompt   string
+	model          string
+	chatModel      einomodel.ToolCallingChatModel
+	contextBuilder *ContextBuilder
+	messages       []*schema.Message
+	tools          map[tool.AgentTool]tool.Tool
+	hooks          *HookManager
 }
 
 type AgentRunResult struct {
@@ -94,12 +95,13 @@ func NewAgent(modelConf config.ModelConfig, systemPrompt string, tools []tool.To
 	}
 
 	a := Agent{
-		systemPrompt: systemPrompt,
-		model:        modelConf.Model,
-		chatModel:    chatModel,
-		tools:        make(map[tool.AgentTool]tool.Tool),
-		messages:     make([]*schema.Message, 0),
-		hooks:        NewHookManager(),
+		systemPrompt:   systemPrompt,
+		model:          modelConf.Model,
+		chatModel:      chatModel,
+		contextBuilder: NewContextBuilder(systemPrompt),
+		tools:          make(map[tool.AgentTool]tool.Tool),
+		messages:       make([]*schema.Message, 0),
+		hooks:          NewHookManager(),
 	}
 	for _, t := range tools {
 		a.tools[t.ToolName()] = t
@@ -238,10 +240,6 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 	}
 }
 
-func (a *Agent) messagesWithRuntimeContext(runCtx *RunContext) []*schema.Message {
-	return a.messagesWithRuntimeContextForMessages(a.messages, runCtx)
-}
-
 func (a *Agent) toolsForRun(runCtx *RunContext) []einotool.BaseTool {
 	tools, available := a.enabledToolsForRun(runCtx)
 	policy := effectiveToolPolicy(runCtx, available)
@@ -304,30 +302,6 @@ func effectiveToolPolicy(runCtx *RunContext, available map[tool.AgentTool]einoto
 	}
 	policy.AllowedTools = allowed
 	return policy
-}
-
-func (a *Agent) messagesWithRuntimeContextForMessages(input []*schema.Message, runCtx *RunContext) []*schema.Message {
-	runtimeContext := ""
-	if runCtx != nil {
-		runtimeContext = runCtx.RuntimeContextText()
-	}
-
-	if runtimeContext == "" {
-		return input
-	}
-
-	messages := make([]*schema.Message, 0, len(input)+1)
-	systemContent := strings.TrimSpace(a.systemPrompt + "\n\n" + runtimeContext)
-	messages = append(messages, schema.SystemMessage(systemContent))
-	if len(input) == 0 {
-		return messages
-	}
-	if input[0].Role == schema.System {
-		messages = append(messages, input[1:]...)
-	} else {
-		messages = append(messages, input...)
-	}
-	return messages
 }
 
 func toolTraceFromResult(result ToolResult) AgentTraceItem {

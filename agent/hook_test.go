@@ -139,7 +139,10 @@ func TestRuntimeContextDoesNotAddSecondSystemMessage(t *testing.T) {
 	runCtx := NewRunContext("next", RunModeSync)
 	runCtx.SetContextBlock("memory", "Memory", "User prefers concise replies.")
 
-	messages := agent.messagesWithRuntimeContext(runCtx)
+	messages, err := agent.contextBuilder.Build(context.Background(), runCtx, agent.messages)
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
 
 	if len(messages) != len(agent.messages) {
 		t.Fatalf("messages = %d, want %d; runtime context should be merged into first system message", len(messages), len(agent.messages))
@@ -183,6 +186,73 @@ func TestBeforeToolCallHookCanBlockExecution(t *testing.T) {
 	}
 	if toolResults[0].Error == "" || !strings.Contains(toolResults[0].Content, "blocked by policy") {
 		t.Fatalf("recorded blocked tool result = %+v", toolResults[0])
+	}
+}
+
+func TestToolCallMiddlewareLimitsLargeToolOutput(t *testing.T) {
+	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewBashTool()})
+	runCtx := NewRunContext("hello", RunModeSync)
+	runtime := &einoAgentRun{
+		agent:       agent,
+		runCtx:      runCtx,
+		result:      &AgentRunResult{Trace: make([]AgentTraceItem, 0)},
+		toolResults: make(map[string]ToolResult),
+	}
+
+	large := strings.Repeat("H", toolResultHeadRunes) +
+		strings.Repeat("M", 123) +
+		strings.Repeat("T", toolResultTailRunes)
+	wrapped := runtime.toolCallMiddleware().Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+		return &compose.ToolOutput{Result: large}, nil
+	})
+
+	output, err := wrapped(context.Background(), &compose.ToolInput{
+		Name:      string(tool.AgentToolBash),
+		Arguments: `{"command":"huge"}`,
+		CallID:    "call-large",
+	})
+
+	if err != nil {
+		t.Fatalf("middleware returned error: %v", err)
+	}
+	if output == nil {
+		t.Fatal("output is nil")
+	}
+	if output.Result == large {
+		t.Fatal("tool output was not limited")
+	}
+	for _, want := range []string{
+		"[tool output truncated:",
+		"original 20123 characters",
+		"omitted 123 characters",
+	} {
+		if !strings.Contains(output.Result, want) {
+			t.Fatalf("limited output missing %q:\n%s", want, output.Result)
+		}
+	}
+	if strings.Contains(output.Result, strings.Repeat("M", 20)) {
+		t.Fatalf("limited output still contains omitted middle content")
+	}
+	if !strings.HasPrefix(output.Result, strings.Repeat("H", 20)) {
+		t.Fatalf("limited output should keep the head")
+	}
+	if !strings.HasSuffix(output.Result, strings.Repeat("T", 20)) {
+		t.Fatalf("limited output should keep the tail")
+	}
+
+	toolResults := runCtx.ToolResults()
+	if len(toolResults) != 1 {
+		t.Fatalf("recorded tool results = %d, want 1", len(toolResults))
+	}
+	if toolResults[0].Content != output.Result {
+		t.Fatalf("run context recorded raw or mismatched content")
+	}
+	remembered, ok := runtime.toolResults["call-large"]
+	if !ok {
+		t.Fatalf("tool result was not remembered by call id")
+	}
+	if remembered.Content != output.Result {
+		t.Fatalf("remembered tool result = %q, want limited output", remembered.Content)
 	}
 }
 

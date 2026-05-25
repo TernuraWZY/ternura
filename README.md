@@ -69,9 +69,14 @@ FEISHU_ALLOW_OPEN_IDS=*
 FEISHU_GROUP_POLICY=mention
 FEISHU_REPLY_TO_MESSAGE=true
 FEISHU_TOPIC_ISOLATION=true
+FEISHU_PROCESSING_REACTION=true
+FEISHU_PROCESSING_DELAY=1s
+FEISHU_PROCESSING_REACTION_TYPE=OneSecond
 ```
 
 默认 `FEISHU_EVENT_MODE=websocket`，对应飞书开放平台里的“长连接”订阅方式。启用长连接后不需要公网回调地址，只需要在飞书后台开启事件订阅并订阅 `im.message.receive_v1`，服务启动时会用 App ID / Secret 建立 WebSocket 长连接。
+
+`FEISHU_PROCESSING_REACTION=true` 时，如果 Agent 在 `FEISHU_PROCESSING_DELAY` 内还没有生成最终回复，会先给原消息添加一个 `FEISHU_PROCESSING_REACTION_TYPE` 表情回应，用于确认机器人已经收到并开始处理。
 
 如果改用 HTTP 回调，可以设置：
 
