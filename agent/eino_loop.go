@@ -31,8 +31,12 @@ type einoAgentRun struct {
 	ignoredToolPolicy ToolPolicy
 	requiredPolicies  []ToolPolicy
 	observedMessages  map[string]struct{}
+	toolCalls         map[string]schema.ToolCall
+	toolResults       map[string]ToolResult
 	preparedModelCall bool
 	modelCallErr      error
+	callbackErr       error
+	callbackWG        sync.WaitGroup
 }
 
 func (a *Agent) newEinoAgentRun(ctx context.Context, runCtx *RunContext, result *AgentRunResult, emit func(AgentStreamEvent) error) (*einoAgentRun, error) {
@@ -46,6 +50,8 @@ func (a *Agent) newEinoAgentRun(ctx context.Context, runCtx *RunContext, result 
 		result:           result,
 		emit:             emit,
 		observedMessages: make(map[string]struct{}),
+		toolCalls:        make(map[string]schema.ToolCall),
+		toolResults:      make(map[string]ToolResult),
 	}
 	if err := runtime.beforeModelCall(ctx); err != nil {
 		return nil, err
@@ -80,15 +86,14 @@ func (a *Agent) newEinoAgentRun(ctx context.Context, runCtx *RunContext, result 
 
 func (r *einoAgentRun) Generate(ctx context.Context) (*schema.Message, error) {
 	log.Printf("calling Eino ReAct agent with model %s...", r.agent.model)
-	messageFutureOption, messageFuture := einoreact.WithMessageFuture()
-	message, err := r.react.Generate(ctx, cloneMessages(r.agent.messages), messageFutureOption)
+	message, err := r.react.Generate(ctx, cloneMessages(r.agent.messages), r.traceCallbackOption())
 	if err != nil {
 		return nil, err
 	}
 	if err := r.modelCallError(); err != nil {
 		return nil, err
 	}
-	if err := r.collectGeneratedMessages(ctx, messageFuture); err != nil {
+	if err := r.waitTraceCallbacks(); err != nil {
 		return nil, err
 	}
 	return message, nil
@@ -99,28 +104,22 @@ func (r *einoAgentRun) Stream(ctx context.Context) (*schema.Message, error) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	messageFutureOption, messageFuture := einoreact.WithMessageFuture()
-	stream, err := r.react.Stream(streamCtx, cloneMessages(r.agent.messages), messageFutureOption)
+	stream, err := r.react.Stream(streamCtx, cloneMessages(r.agent.messages), r.traceCallbackOption())
 	if err != nil {
 		log.Printf("failed to stream Eino ReAct agent: %v", err)
 		return nil, err
 	}
-
-	messageObservationDone := make(chan error, 1)
-	go func() {
-		messageObservationDone <- r.collectStreamedMessages(streamCtx, messageFuture)
-	}()
 
 	message, err := schema.ConcatMessageStream(stream)
 	if err != nil {
 		cancel()
-		if observationErr := <-messageObservationDone; observationErr != nil {
-			log.Printf("failed to collect Eino ReAct messages: %v", observationErr)
+		if callbackErr := r.waitTraceCallbacks(); callbackErr != nil {
+			log.Printf("failed to collect Eino callback trace: %v", callbackErr)
 		}
 		log.Printf("failed to stream Eino ReAct agent: %v", err)
 		return nil, err
 	}
-	if err := <-messageObservationDone; err != nil {
+	if err := r.waitTraceCallbacks(); err != nil {
 		return nil, err
 	}
 	if err := r.modelCallError(); err != nil {
@@ -224,90 +223,6 @@ func (r *einoAgentRun) modelCallError() error {
 	return r.modelCallErr
 }
 
-func (r *einoAgentRun) collectGeneratedMessages(ctx context.Context, future einoreact.MessageFuture) error {
-	iter := future.GetMessages()
-	for {
-		message, hasNext, err := iter.Next()
-		if err != nil {
-			return err
-		}
-		if !hasNext {
-			return nil
-		}
-		if err := r.recordEinoMessage(ctx, message); err != nil {
-			return err
-		}
-	}
-}
-
-func (r *einoAgentRun) collectStreamedMessages(ctx context.Context, future einoreact.MessageFuture) error {
-	iter := future.GetMessageStreams()
-	var firstErr error
-	for {
-		messageStream, hasNext, err := iter.Next()
-		if err != nil {
-			return err
-		}
-		if !hasNext {
-			return firstErr
-		}
-		if err := r.recordEinoMessageStream(ctx, messageStream); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-		}
-	}
-}
-
-func (r *einoAgentRun) recordEinoMessageStream(ctx context.Context, stream *schema.StreamReader[*schema.Message]) error {
-	if stream == nil {
-		return nil
-	}
-	defer stream.Close()
-
-	var contentRouter *streamingContentRouter
-	if r.emit != nil {
-		contentRouter = r.newContentRouter()
-	}
-
-	chunks := make([]*schema.Message, 0)
-	for {
-		chunk, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		if chunk == nil {
-			continue
-		}
-		chunks = append(chunks, chunk)
-		if chunk.Role != schema.Tool && chunk.Content != "" {
-			r.appendRawContent(chunk.Content)
-			if contentRouter != nil {
-				if err := contentRouter.Write(chunk.Content); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	if contentRouter != nil {
-		if err := contentRouter.Flush(); err != nil {
-			return err
-		}
-	}
-	if len(chunks) == 0 {
-		return nil
-	}
-
-	message, err := schema.ConcatMessages(chunks)
-	if err != nil {
-		return err
-	}
-	return r.recordEinoMessage(ctx, message)
-}
-
 func (r *einoAgentRun) recordEinoMessage(ctx context.Context, message *schema.Message) error {
 	if message == nil {
 		return nil
@@ -317,6 +232,11 @@ func (r *einoAgentRun) recordEinoMessage(ctx context.Context, message *schema.Me
 	}
 	if message.Role == schema.Assistant {
 		return r.recordAssistantMessage(ctx, message)
+	}
+	if message.Role == schema.Tool {
+		if err := r.recordToolMessage(message); err != nil {
+			return err
+		}
 	}
 
 	r.mu.Lock()
@@ -362,6 +282,11 @@ func (r *einoAgentRun) recordAssistantMessage(ctx context.Context, message *sche
 	policy := r.nextRequiredToolPolicy()
 
 	r.mu.Lock()
+	for _, call := range message.ToolCalls {
+		if call.ID != "" {
+			r.toolCalls[call.ID] = call
+		}
+	}
 	r.agent.messages = append(r.agent.messages, message)
 	if r.emit == nil {
 		appendThinkTrace(r.result, message.Content)
@@ -378,6 +303,34 @@ func (r *einoAgentRun) recordAssistantMessage(ctx context.Context, message *sche
 		r.runCtx.ClearToolPolicy()
 	}
 	return nil
+}
+
+func (r *einoAgentRun) recordToolMessage(message *schema.Message) error {
+	toolResult := r.toolResultForMessage(message)
+	return r.recordToolTrace(toolResult)
+}
+
+func (r *einoAgentRun) toolResultForMessage(message *schema.Message) ToolResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if result, ok := r.toolResults[message.ToolCallID]; ok {
+		return result
+	}
+
+	call := schema.ToolCall{
+		ID: message.ToolCallID,
+		Function: schema.FunctionCall{
+			Name: message.ToolName,
+		},
+	}
+	if savedCall, ok := r.toolCalls[message.ToolCallID]; ok {
+		call = savedCall
+	}
+	return ToolResult{
+		Call:    call,
+		Content: message.Content,
+	}
 }
 
 func (r *einoAgentRun) newContentRouter() *streamingContentRouter {
@@ -433,11 +386,9 @@ func (r *einoAgentRun) toolCallMiddleware() compose.ToolMiddleware {
 						Content: err.Error(),
 						Err:     err,
 					}
+					r.rememberToolResult(toolResult)
 					if r.runCtx != nil {
 						r.runCtx.recordToolResult(toolResult)
-					}
-					if err := r.recordToolTrace(toolResult); err != nil {
-						return nil, err
 					}
 					return &compose.ToolOutput{Result: toolResult.Content}, nil
 				}
@@ -460,16 +411,26 @@ func (r *einoAgentRun) toolCallMiddleware() compose.ToolMiddleware {
 					toolResult.Err = err
 					toolResult.Content = err.Error()
 				}
+				r.rememberToolResult(toolResult)
 				if r.runCtx != nil {
 					r.runCtx.recordToolResult(toolResult)
-				}
-				if err := r.recordToolTrace(toolResult); err != nil {
-					return nil, err
 				}
 				return &compose.ToolOutput{Result: toolResult.Content}, nil
 			}
 		},
 	}
+}
+
+func (r *einoAgentRun) rememberToolResult(result ToolResult) {
+	if result.Call.ID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.toolResults == nil {
+		r.toolResults = make(map[string]ToolResult)
+	}
+	r.toolResults[result.Call.ID] = result
 }
 
 func (r *einoAgentRun) recordToolTrace(toolResult ToolResult) error {
