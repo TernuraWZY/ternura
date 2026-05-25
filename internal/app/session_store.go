@@ -33,7 +33,7 @@ type persistedMessage struct {
 }
 
 // runTriggerKind 标记某次 run 是由谁触发的。空字符串/"user" 表示常规用户输入，
-// "schedule" 表示由后台定时任务触发——前端需要据此把"YOU"气泡换成"⏰ 定时触发"banner，
+// "schedule" 表示由后台定时任务触发，外部端可以据此把用户消息渲染成定时触发提示，
 // 避免把系统注入的 prompt 误显示成用户原话。
 const (
 	runTriggerKindUser     = "user"
@@ -117,31 +117,6 @@ type sessionTodosFile struct {
 	Todos   []persistedTodo `json:"todos,omitempty"`
 }
 
-type historySession struct {
-	SessionID string          `json:"session_id"`
-	Title     string          `json:"title"`
-	CreatedAt string          `json:"created_at"`
-	UpdatedAt string          `json:"updated_at"`
-	RunCount  int             `json:"run_count"`
-	LastRun   *persistedRun   `json:"last_run,omitempty"`
-	Runs      []persistedRun  `json:"runs,omitempty"`
-	Todos     []persistedTodo `json:"todos,omitempty"`
-}
-
-type historyResponse struct {
-	CurrentSessionID string           `json:"current_session_id"`
-	Sessions         []historySession `json:"sessions"`
-}
-
-type sessionDetailResponse struct {
-	CurrentSessionID string         `json:"current_session_id"`
-	Session          historySession `json:"session"`
-}
-
-type selectSessionRequest struct {
-	SessionID string `json:"session_id"`
-}
-
 type sessionStore struct {
 	mu        sync.Mutex
 	path      string
@@ -213,7 +188,7 @@ func (s *sessionStore) StartRunForSession(sessionID string, run runLifecycle, us
 }
 
 // StartScheduledRunForSession 用于后台定时任务到点触发的 run：把展示给用户的原始 prompt 写入
-// run.UserMessage，并打上 TriggerKind=schedule 让前端渲染成 banner 而不是 YOU 气泡。
+// run.UserMessage，并打上 TriggerKind=schedule 供外部端区分真实用户输入和后台触发。
 // 它不会更新 session 标题（避免被自动触发的 prompt 覆盖用户首次输入的标题）。
 func (s *sessionStore) StartScheduledRunForSession(sessionID string, run runLifecycle, displayPrompt string) error {
 	return s.startRunLocked(sessionID, run, displayPrompt, runTriggerKindSchedule)
@@ -251,7 +226,7 @@ func (s *sessionStore) FinishRunForSession(sessionID string, run runLifecycle, u
 }
 
 // FinishScheduledRunForSession 把定时触发的 run 写回 session：
-//   - displayPrompt 写入 run.UserMessage，让前端展示自然语言的提醒文本；
+//   - displayPrompt 写入 run.UserMessage，让外部端展示自然语言的提醒文本；
 //   - runtimePrompt 才是真正塞进 LLM messages 历史的 user 内容（一般是带 "[cron job fired]" 前缀的包装版本），
 //     这样后续轮次模型能清楚分辨"用户原话"和"系统触发的指令"。
 func (s *sessionStore) FinishScheduledRunForSession(sessionID string, run runLifecycle, displayPrompt string, runtimePrompt string, result agent.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
@@ -856,56 +831,6 @@ func normalizeSnapshot(snapshot sessionSnapshot) sessionSnapshot {
 	snapshot.LegacyMessages = nil
 	snapshot.LegacyRuns = nil
 	return snapshot
-}
-
-func historyFromSnapshot(snapshot sessionSnapshot) historyResponse {
-	resp := historyResponse{
-		CurrentSessionID: snapshot.CurrentSessionID,
-		Sessions:         make([]historySession, 0, len(snapshot.Sessions)),
-	}
-	for _, session := range snapshot.Sessions {
-		resp.Sessions = append(resp.Sessions, historySessionFromSession(session, false))
-	}
-	return resp
-}
-
-func sessionDetailFromSnapshot(snapshot sessionSnapshot, sessionID string) (sessionDetailResponse, error) {
-	if sessionID == "" {
-		sessionID = snapshot.CurrentSessionID
-	}
-	session := findSession(snapshot.Sessions, sessionID)
-	if session == nil {
-		return sessionDetailResponse{}, fmt.Errorf("session %q not found", sessionID)
-	}
-	return sessionDetailResponse{
-		CurrentSessionID: snapshot.CurrentSessionID,
-		Session:          historySessionFromSession(*session, true),
-	}, nil
-}
-
-func historySessionFromSession(session persistedSession, includeRuns bool) historySession {
-	item := historySession{
-		SessionID: session.SessionID,
-		Title:     session.Title,
-		CreatedAt: session.CreatedAt,
-		UpdatedAt: session.UpdatedAt,
-		RunCount:  len(session.Runs),
-		Todos:     cloneTodos(session.Todos),
-	}
-	if len(session.Runs) > 0 {
-		lastRun := summarizeHistoryRun(session.Runs[len(session.Runs)-1])
-		item.LastRun = &lastRun
-	}
-	if includeRuns {
-		item.Runs = cloneRuns(session.Runs)
-	}
-	return item
-}
-
-func summarizeHistoryRun(run persistedRun) persistedRun {
-	run.Trace = nil
-	run.RawContent = ""
-	return run
 }
 
 func currentSessionFromSnapshot(snapshot sessionSnapshot) (persistedSession, bool) {

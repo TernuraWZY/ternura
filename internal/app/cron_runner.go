@@ -257,6 +257,7 @@ func (s *agentServer) newAgentForSessionWithCron(sessionID string, cronTool *too
 		agent.WithHooks(
 			newCurrentTimeHook(),
 			newMemoryHook(s.memory, func() string { return sessionID }),
+			newToolMemoryHook(s.memory, func() string { return sessionID }),
 			newScheduleGuidanceHook(),
 			newStateGuardHook(s.cron),
 		),

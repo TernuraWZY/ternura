@@ -13,7 +13,7 @@ const (
 	RunStatusError   = "error"
 	RunStatusSkipped = "skipped"
 
-	// Legacy API statuses (web UI).
+	// Legacy statuses are kept for migrated schedule data and guard logic.
 	LegacyScheduled = "scheduled"
 	LegacyRunning   = "running"
 	LegacyCompleted = "completed"
@@ -38,7 +38,7 @@ type Payload struct {
 	Delivery  *DeliveryTarget `json:"delivery,omitempty"`
 }
 
-// DeliveryTarget 记录外部 channel 的回传地址。Web Console 不需要它；
+// DeliveryTarget 记录外部 channel 的回传地址。CLI 本地运行不需要它；
 // Feishu 这类外部入口会用它把 cron 触发后的 Agent 回复发回原聊天。
 type DeliveryTarget struct {
 	Channel       string `json:"channel,omitempty"`
@@ -100,7 +100,7 @@ type AddParams struct {
 	DelaySeconds   int    // 相对延迟，映射为 at
 }
 
-// LegacyTask 兼容旧 /api/schedules 与 web UI。
+// LegacyTask keeps the old schedule projection for migrated data and guard logic.
 type LegacyTask struct {
 	ID         string `json:"id"`
 	Title      string `json:"title"`

@@ -2,8 +2,12 @@ package app
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cloudwego/eino/schema"
 
 	"ternura/agent"
 	"ternura/tool"
@@ -105,5 +109,96 @@ func TestMemoryStoreShortTermMemoryRollsBySession(t *testing.T) {
 	}
 	if strings.Contains(contextText, "first") || !strings.Contains(contextText, "second") || !strings.Contains(contextText, "third") {
 		t.Fatalf("short-term context not rolled correctly: %q", contextText)
+	}
+}
+
+func TestMemoryStoreCapturesToolMemoryAndRecallsByQuery(t *testing.T) {
+	root := t.TempDir()
+	store := newMemoryStore(root)
+	result := agent.ToolResult{
+		Call: schema.ToolCall{
+			ID: "call-read",
+			Function: schema.FunctionCall{
+				Name:      string(tool.AgentToolRead),
+				Arguments: `{"path":"agent/context_builder.go"}`,
+			},
+		},
+		Content: "context builder source with tool memory details",
+	}
+
+	record, ok, err := store.CaptureToolMemory(context.Background(), "session-test", result)
+	if err != nil {
+		t.Fatalf("capture tool memory: %v", err)
+	}
+	if !ok {
+		t.Fatal("tool memory should be captured")
+	}
+	if err := store.AppendToolMemories("session-test", []toolMemoryRecord{record}); err != nil {
+		t.Fatalf("append tool memory: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(record.RawRef)))
+	if err != nil {
+		t.Fatalf("read raw ref: %v", err)
+	}
+	if string(raw) != result.Content {
+		t.Fatalf("raw artifact = %q, want %q", raw, result.Content)
+	}
+
+	contextText, err := store.RuntimeContextForQuery("session-test", "context_builder.go 的工具结果")
+	if err != nil {
+		t.Fatalf("runtime context: %v", err)
+	}
+	if !strings.Contains(contextText, "Relevant tool memory:") ||
+		!strings.Contains(contextText, record.ID) ||
+		!strings.Contains(contextText, record.RawRef) ||
+		!strings.Contains(contextText, "context_builder.go") {
+		t.Fatalf("context missing tool memory:\n%s", contextText)
+	}
+
+	unrelated, err := store.RuntimeContextForQuery("session-test", "你好")
+	if err != nil {
+		t.Fatalf("runtime context unrelated: %v", err)
+	}
+	if strings.Contains(unrelated, "Relevant tool memory:") {
+		t.Fatalf("unrelated query should not recall tool memory:\n%s", unrelated)
+	}
+}
+
+func TestToolMemoryHookDefersSummaryUntilRunFinishes(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	hook := newToolMemoryHook(store, func() string { return "session-test" })
+	run := agent.NewRunContext("read context builder", agent.RunModeSync)
+	result := agent.ToolResult{
+		Call: schema.ToolCall{
+			ID: "call-read",
+			Function: schema.FunctionCall{
+				Name:      string(tool.AgentToolRead),
+				Arguments: `{"path":"agent/context_builder.go"}`,
+			},
+		},
+		Content: "context builder output",
+	}
+
+	if err := hook.AfterToolCall(context.Background(), run, &result); err != nil {
+		t.Fatalf("after tool call: %v", err)
+	}
+	before, err := store.RuntimeContextForQuery("session-test", "context_builder.go")
+	if err != nil {
+		t.Fatalf("runtime context before run finish: %v", err)
+	}
+	if strings.Contains(before, "Relevant tool memory:") {
+		t.Fatalf("tool memory should not be visible before run finishes:\n%s", before)
+	}
+
+	if err := hook.AfterRun(context.Background(), run, agent.AgentRunResult{Content: "done"}, nil); err != nil {
+		t.Fatalf("after run: %v", err)
+	}
+	after, err := store.RuntimeContextForQuery("session-test", "context_builder.go")
+	if err != nil {
+		t.Fatalf("runtime context after run finish: %v", err)
+	}
+	if !strings.Contains(after, "Relevant tool memory:") {
+		t.Fatalf("tool memory should be visible after run finishes:\n%s", after)
 	}
 }

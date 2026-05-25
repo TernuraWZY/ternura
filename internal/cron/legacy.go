@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// ToLegacyTask 转为旧 schedules API 格式，供 web UI 继续使用。
+// ToLegacyTask keeps the old schedule projection for migrated data and guard logic.
 func (j Job) ToLegacyTask() LegacyTask {
 	nextMS := j.State.NextRunAtMS
 	if nextMS == 0 && j.Schedule.Kind == ScheduleAt {

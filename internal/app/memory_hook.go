@@ -27,7 +27,7 @@ func (h *memoryHook) BeforeModelCall(ctx context.Context, run *agent.RunContext)
 	if h == nil || h.store == nil || run == nil {
 		return nil
 	}
-	content, err := h.store.RuntimeContext(h.currentSessionID())
+	content, err := h.store.RuntimeContextForQuery(h.currentSessionID(), run.Query)
 	if err != nil {
 		log.Printf("load memory context: %v", err)
 		return nil
