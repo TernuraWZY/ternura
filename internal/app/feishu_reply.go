@@ -11,27 +11,28 @@ import (
 const maxFeishuTraceRunes = 4000
 
 func formatFeishuAgentReply(result agent.AgentRunResult) feishu.Reply {
+	memoryItems := traceItemsByType(result.Trace, "memory")
 	thinkItems := traceItemsByType(result.Trace, "think")
 	toolItems := traceItemsByType(result.Trace, "tool")
 	content := strings.TrimSpace(result.Content)
-	if len(thinkItems) == 0 && len(toolItems) == 0 {
+	if len(memoryItems) == 0 && len(thinkItems) == 0 && len(toolItems) == 0 {
 		return feishu.Reply{Content: content}
 	}
 
-	fallback := formatFeishuAgentReplyText(content, thinkItems, toolItems)
+	fallback := formatFeishuAgentReplyText(content, memoryItems, thinkItems, toolItems)
 	return feishu.Reply{
 		Content: fallback,
-		Card:    buildFeishuAgentReplyCard(content, thinkItems, toolItems),
+		Card:    buildFeishuAgentReplyCard(content, memoryItems, thinkItems, toolItems),
 	}
 }
 
-func formatFeishuAgentReplyText(content string, thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem) string {
+func formatFeishuAgentReplyText(content string, memoryItems []agent.AgentTraceItem, thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem) string {
 	sections := make([]string, 0, 3)
 	if content != "" {
 		sections = append(sections, content)
 	}
-	if len(thinkItems) > 0 || len(toolItems) > 0 {
-		sections = append(sections, formatFeishuTraceSection(thinkItems, toolItems))
+	if len(memoryItems) > 0 || len(thinkItems) > 0 || len(toolItems) > 0 {
+		sections = append(sections, formatFeishuTraceSection(memoryItems, thinkItems, toolItems))
 	}
 	return strings.TrimSpace(strings.Join(sections, "\n\n---\n\n"))
 }
@@ -46,8 +47,11 @@ func traceItemsByType(trace []agent.AgentTraceItem, traceType string) []agent.Ag
 	return items
 }
 
-func formatFeishuTraceSection(thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem) string {
+func formatFeishuTraceSection(memoryItems []agent.AgentTraceItem, thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem) string {
 	sections := []string{"## 过程信息"}
+	if len(memoryItems) > 0 {
+		sections = append(sections, "### 上下文记忆\n"+formatFeishuTraceGroup("上下文记忆", memoryItems))
+	}
 	if len(thinkItems) > 0 {
 		sections = append(sections, "### 思考\n"+formatFeishuTraceGroup("思考", thinkItems))
 	}
@@ -76,7 +80,7 @@ func formatFeishuTraceGroup(title string, items []agent.AgentTraceItem) string {
 	return strings.Join(lines, "\n")
 }
 
-func buildFeishuAgentReplyCard(content string, thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem) map[string]any {
+func buildFeishuAgentReplyCard(content string, memoryItems []agent.AgentTraceItem, thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem) map[string]any {
 	elements := make([]any, 0, 4)
 	if content != "" {
 		elements = append(elements, map[string]any{
@@ -84,8 +88,11 @@ func buildFeishuAgentReplyCard(content string, thinkItems []agent.AgentTraceItem
 			"content": content,
 		})
 	}
-	if content != "" && (len(thinkItems) > 0 || len(toolItems) > 0) {
+	if content != "" && (len(memoryItems) > 0 || len(thinkItems) > 0 || len(toolItems) > 0) {
 		elements = append(elements, map[string]any{"tag": "hr"})
+	}
+	if len(memoryItems) > 0 {
+		elements = append(elements, feishuCollapsiblePanel("上下文记忆", len(memoryItems), formatFeishuTraceGroup("上下文记忆", memoryItems)))
 	}
 	if len(thinkItems) > 0 {
 		elements = append(elements, feishuCollapsiblePanel("思考", len(thinkItems), formatFeishuTraceGroup("思考", thinkItems)))

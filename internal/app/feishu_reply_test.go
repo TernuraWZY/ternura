@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -56,6 +57,51 @@ func TestFormatFeishuAgentReplyUsesCollapsedTracePanels(t *testing.T) {
 	}
 	if collapsedPanels != 2 {
 		t.Fatalf("collapsed panels = %d, want 2; card=%+v", collapsedPanels, card)
+	}
+}
+
+func TestFormatFeishuAgentReplyUsesCollapsedMemoryPanel(t *testing.T) {
+	reply := formatFeishuAgentReply(agent.AgentRunResult{
+		Content: "我查到了。",
+		Trace: []agent.AgentTraceItem{{
+			Type:    "memory",
+			Title:   "上下文记忆搜索",
+			Content: "**Keywords**\n\n`redis`, `ttl`\n\n**Search query**\n\nredis ttl",
+		}},
+	})
+
+	if reply.Card == nil {
+		t.Fatalf("reply should include interactive card")
+	}
+	for _, want := range []string{"我查到了。", "### 上下文记忆", "redis ttl"} {
+		if !strings.Contains(reply.Content, want) {
+			t.Fatalf("fallback reply missing %q:\n%s", want, reply.Content)
+		}
+	}
+
+	card, ok := reply.Card.(map[string]any)
+	if !ok {
+		t.Fatalf("card type = %T", reply.Card)
+	}
+	body, _ := card["body"].(map[string]any)
+	elements, _ := body["elements"].([]any)
+	var memoryPanel map[string]any
+	for _, element := range elements {
+		panel, ok := element.(map[string]any)
+		if !ok || panel["tag"] != "collapsible_panel" {
+			continue
+		}
+		header, _ := panel["header"].(map[string]any)
+		title, _ := header["title"].(map[string]any)
+		if strings.Contains(fmt.Sprint(title["content"]), "上下文记忆") {
+			memoryPanel = panel
+		}
+	}
+	if memoryPanel == nil {
+		t.Fatalf("memory panel missing: %+v", card)
+	}
+	if expanded, _ := memoryPanel["expanded"].(bool); expanded {
+		t.Fatalf("memory panel should be collapsed by default: %+v", memoryPanel)
 	}
 }
 

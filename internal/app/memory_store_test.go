@@ -304,6 +304,71 @@ func TestMemoryHookUsesAIKeywordExtractorForRecall(t *testing.T) {
 	}
 }
 
+func TestMemoryHookAddsActiveMemoryTrace(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	if _, err := store.Remember(context.Background(), tool.MemoryItem{
+		Category: tool.MemoryCategoryProject,
+		Content:  "Redis cache TTL is 10 minutes.",
+	}); err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+	extractor := &fakeActiveMemoryKeywordExtractor{
+		result: activeMemoryKeywordResult{
+			ShouldRecall: true,
+			QueryMode:    "recent",
+			Keywords:     []string{"redis", "ttl"},
+			SearchQuery:  "redis ttl",
+		},
+	}
+	hook := newMemoryHook(store, func() string { return "session-test" }, withActiveMemoryKeywordExtractor(extractor))
+	run := agent.NewRunContext("这个缓存呢", agent.RunModeSync)
+	result := agent.AgentRunResult{Content: "缓存是 10 分钟。"}
+
+	if err := hook.BeforeModelCall(context.Background(), run); err != nil {
+		t.Fatalf("before model call: %v", err)
+	}
+	if err := hook.FinalizeRun(context.Background(), run, &result); err != nil {
+		t.Fatalf("finalize run: %v", err)
+	}
+
+	if len(result.Trace) != 1 {
+		t.Fatalf("trace length = %d, want 1: %+v", len(result.Trace), result.Trace)
+	}
+	item := result.Trace[0]
+	if item.Type != "memory" || item.Title != "上下文记忆搜索" {
+		t.Fatalf("trace item = %+v, want memory trace", item)
+	}
+	for _, want := range []string{"ai_recent", "redis", "ttl", "redis ttl", "Redis cache TTL"} {
+		if !strings.Contains(item.Content, want) {
+			t.Fatalf("memory trace missing %q:\n%s", want, item.Content)
+		}
+	}
+}
+
+func TestMemoryHookSkipsTraceWhenRecallIsNotUseful(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	extractor := &fakeActiveMemoryKeywordExtractor{
+		result: activeMemoryKeywordResult{
+			ShouldRecall: false,
+			QueryMode:    "latest",
+		},
+	}
+	hook := newMemoryHook(store, func() string { return "session-test" }, withActiveMemoryKeywordExtractor(extractor))
+	run := agent.NewRunContext("你好", agent.RunModeSync)
+	result := agent.AgentRunResult{Content: "你好！"}
+
+	if err := hook.BeforeModelCall(context.Background(), run); err != nil {
+		t.Fatalf("before model call: %v", err)
+	}
+	if err := hook.FinalizeRun(context.Background(), run, &result); err != nil {
+		t.Fatalf("finalize run: %v", err)
+	}
+
+	if len(result.Trace) != 0 {
+		t.Fatalf("trace length = %d, want 0: %+v", len(result.Trace), result.Trace)
+	}
+}
+
 func TestMemoryStoreCapturesToolMemoryAndRecallsByQuery(t *testing.T) {
 	root := t.TempDir()
 	store := newMemoryStore(root)
