@@ -79,6 +79,32 @@ func TestSessionStorePersistsRunsAndConversation(t *testing.T) {
 	}
 }
 
+func TestSessionStorePersistsRuntimeMessageSeparatelyFromDisplayMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	store := newSessionStore(path)
+	startedAt := time.Date(2026, 5, 28, 8, 30, 0, 0, time.UTC)
+	finishedAt := startedAt.Add(time.Second)
+	run := runLifecycle{ID: "run-plan-approved", StartedAt: startedAt}
+
+	if err := store.StartRun(run, "确认执行"); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if err := store.FinishRunForSessionWithRuntimeMessage("", run, "确认执行", "[approved plan execution]\nOriginal task", agent.AgentRunResult{Content: "done"}, runStatusSucceeded, finishedAt, nil); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+
+	session, ok := currentSessionFromSnapshot(store.Snapshot())
+	if !ok {
+		t.Fatalf("current session not found")
+	}
+	if len(session.Runs) != 1 || session.Runs[0].UserMessage != "确认执行" {
+		t.Fatalf("run display message = %+v", session.Runs)
+	}
+	if len(session.Messages) != 2 || session.Messages[0].Content != "[approved plan execution]\nOriginal task" {
+		t.Fatalf("runtime messages = %+v", session.Messages)
+	}
+}
+
 func TestSessionStoreNewSessionPreservesPreviousSession(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.json")
 	store := newSessionStore(path)
