@@ -39,7 +39,7 @@ func (h *currentTimeHook) BeforeModelCall(_ context.Context, run *agent.RunConte
 		fmt.Sprintf("Timezone: %s (%s)", zoneName, offset),
 		usage,
 	}, "\n")
-	run.SetContextBlock("current-time", "Current Time", content)
+	run.SetContextBlockWithPriority("current-time", "Current Time", content, agent.RuntimeContextPriorityHigh, 1200)
 	return nil
 }
 
@@ -60,7 +60,13 @@ func (h *scheduleGuidanceHook) BeforeModelCall(_ context.Context, run *agent.Run
 	query := strings.TrimSpace(run.Query)
 	if isCronRuntimePrompt(query) {
 		run.SetContextBlock("schedule-guidance", "Schedule Guidance", "")
-		run.SetContextBlock("cron-execution-guidance", "Cron Execution", cronExecutionGuidanceText(unwrapCronRuntimePrompt(query)))
+		run.SetContextBlockWithPriority(
+			"cron-execution-guidance",
+			"Cron Execution",
+			cronExecutionGuidanceText(unwrapCronRuntimePrompt(query)),
+			agent.RuntimeContextPriorityCritical,
+			3000,
+		)
 		run.ClearToolPolicy()
 		return nil
 	}
@@ -74,7 +80,13 @@ func (h *scheduleGuidanceHook) BeforeModelCall(_ context.Context, run *agent.Run
 		run.SetContextBlock("schedule-guidance", "Schedule Guidance", "")
 		return nil
 	}
-	run.SetContextBlock("schedule-guidance", "Schedule Guidance", scheduleGuidanceText(query, isVague))
+	run.SetContextBlockWithPriority(
+		"schedule-guidance",
+		"Schedule Guidance",
+		scheduleGuidanceText(query, isVague),
+		agent.RuntimeContextPriorityCritical,
+		4500,
+	)
 
 	// 工具已执行后不再要求工具，让模型用自然语言收尾。
 	if run.ToolCallCount > 0 {

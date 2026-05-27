@@ -112,6 +112,198 @@ func TestMemoryStoreShortTermMemoryRollsBySession(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreSelectsRelevantLongTermMemoriesForContext(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	store.longTermContextLimit = 2
+	items := []tool.MemoryItem{
+		{Category: tool.MemoryCategoryPreference, Content: "User likes short replies."},
+		{Category: tool.MemoryCategoryProject, Content: "Kubernetes deployment uses namespace ternura-prod."},
+		{Category: tool.MemoryCategoryFact, Content: "Kubernetes cluster logs are checked with kubectl."},
+		{Category: tool.MemoryCategoryFact, Content: "The project uses Go."},
+	}
+	for _, item := range items {
+		if _, err := store.Remember(context.Background(), item); err != nil {
+			t.Fatalf("remember: %v", err)
+		}
+	}
+
+	contextText, err := store.RuntimeContextForQuery("session-test", "帮我看 kubernetes deployment")
+	if err != nil {
+		t.Fatalf("runtime context: %v", err)
+	}
+	if !strings.Contains(contextText, "namespace ternura-prod") || !strings.Contains(contextText, "kubectl") {
+		t.Fatalf("relevant long-term memories missing:\n%s", contextText)
+	}
+	if strings.Contains(contextText, "short replies") || strings.Contains(contextText, "The project uses Go") {
+		t.Fatalf("irrelevant long-term memories should be left out:\n%s", contextText)
+	}
+}
+
+func TestMemoryStoreLimitsShortTermTurnsInContext(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	store.shortTermTurnLimit = 10
+	store.shortTermContextLimit = 2
+
+	for _, message := range []string{"first", "second", "third", "fourth"} {
+		if err := store.AppendShortTermTurn("session-test", message, agent.AgentRunResult{Content: "answer " + message}); err != nil {
+			t.Fatalf("append short-term turn: %v", err)
+		}
+	}
+
+	contextText, err := store.RuntimeContextForQuery("session-test", "continue")
+	if err != nil {
+		t.Fatalf("runtime context: %v", err)
+	}
+	if strings.Contains(contextText, "first") || strings.Contains(contextText, "second") {
+		t.Fatalf("old short-term turns should be left out:\n%s", contextText)
+	}
+	if !strings.Contains(contextText, "third") || !strings.Contains(contextText, "fourth") {
+		t.Fatalf("recent short-term turns missing:\n%s", contextText)
+	}
+}
+
+func TestMemoryStoreActiveRecallUsesRecentTurnsForSearchQuery(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	if _, err := store.Remember(context.Background(), tool.MemoryItem{
+		Category: tool.MemoryCategoryProject,
+		Content:  "Kubernetes deployment uses namespace ternura-prod.",
+	}); err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+	if err := store.AppendShortTermTurn("session-test", "帮我看 kubernetes deployment", agent.AgentRunResult{Content: "我会检查部署状态"}); err != nil {
+		t.Fatalf("append short-term turn: %v", err)
+	}
+
+	recall, err := store.ActiveRecallForQuery("session-test", "现在呢")
+	if err != nil {
+		t.Fatalf("active recall: %v", err)
+	}
+
+	if recall.Status != "ok" {
+		t.Fatalf("recall status = %q, want ok", recall.Status)
+	}
+	if !strings.Contains(recall.SearchQuery, "kubernetes deployment") {
+		t.Fatalf("search query should include recent user turn: %q", recall.SearchQuery)
+	}
+	if !strings.Contains(recall.Summary, "namespace ternura-prod") {
+		t.Fatalf("recall summary missing long-term memory:\n%s", recall.Summary)
+	}
+	if !strings.Contains(recall.Summary, "Relevant recent session context") {
+		t.Fatalf("recall summary missing recent context:\n%s", recall.Summary)
+	}
+	if block := recall.ContextBlock(); !strings.Contains(block, "Untrusted context") || !strings.Contains(block, "Query mode: recent") {
+		t.Fatalf("context block missing active-memory metadata:\n%s", block)
+	}
+}
+
+func TestMemoryStoreActiveRecallReturnsEmptyForUnrelatedQuery(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	if _, err := store.Remember(context.Background(), tool.MemoryItem{
+		Category: tool.MemoryCategoryPreference,
+		Content:  "User likes short replies.",
+	}); err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+
+	recall, err := store.ActiveRecallForQuery("session-test", "天气怎么样")
+	if err != nil {
+		t.Fatalf("active recall: %v", err)
+	}
+
+	if recall.Status != "no_relevant_memory" {
+		t.Fatalf("recall status = %q, want no_relevant_memory", recall.Status)
+	}
+	if recall.ContextBlock() != "" {
+		t.Fatalf("empty recall should not inject context:\n%s", recall.ContextBlock())
+	}
+}
+
+func TestMemoryStoreActiveRecallDoesNotUseRecentTurnsForNewTopic(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	if _, err := store.Remember(context.Background(), tool.MemoryItem{
+		Category: tool.MemoryCategoryProject,
+		Content:  "Kubernetes deployment uses namespace ternura-prod.",
+	}); err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+	if err := store.AppendShortTermTurn("session-test", "帮我看 kubernetes deployment", agent.AgentRunResult{Content: "我会检查部署状态"}); err != nil {
+		t.Fatalf("append short-term turn: %v", err)
+	}
+
+	recall, err := store.ActiveRecallForQuery("session-test", "天气怎么样")
+	if err != nil {
+		t.Fatalf("active recall: %v", err)
+	}
+
+	if recall.Status != "no_relevant_memory" {
+		t.Fatalf("recall status = %q, want no_relevant_memory; summary:\n%s", recall.Status, recall.Summary)
+	}
+	if strings.Contains(recall.SearchQuery, "kubernetes deployment") {
+		t.Fatalf("new-topic search query should not include previous user turn: %q", recall.SearchQuery)
+	}
+}
+
+func TestMemoryHookInjectsActiveMemoryBlock(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	if _, err := store.Remember(context.Background(), tool.MemoryItem{
+		Category: tool.MemoryCategoryProject,
+		Content:  "Kubernetes deployment uses namespace ternura-prod.",
+	}); err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+	if err := store.AppendShortTermTurn("session-test", "帮我看 kubernetes deployment", agent.AgentRunResult{Content: "我会检查部署状态"}); err != nil {
+		t.Fatalf("append short-term turn: %v", err)
+	}
+	hook := newMemoryHook(store, func() string { return "session-test" })
+	run := agent.NewRunContext("现在呢", agent.RunModeSync)
+
+	if err := hook.BeforeModelCall(context.Background(), run); err != nil {
+		t.Fatalf("before model call: %v", err)
+	}
+
+	rendered := run.RuntimeContextText()
+	if !strings.Contains(rendered, "## Active Memory") || !strings.Contains(rendered, "namespace ternura-prod") {
+		t.Fatalf("active memory was not injected:\n%s", rendered)
+	}
+}
+
+func TestMemoryHookUsesAIKeywordExtractorForRecall(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	if _, err := store.Remember(context.Background(), tool.MemoryItem{
+		Category: tool.MemoryCategoryProject,
+		Content:  "Redis cache TTL is 10 minutes.",
+	}); err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+	extractor := &fakeActiveMemoryKeywordExtractor{
+		result: activeMemoryKeywordResult{
+			ShouldRecall: true,
+			QueryMode:    "recent",
+			Keywords:     []string{"redis cache", "ttl"},
+			SearchQuery:  "redis cache ttl",
+		},
+	}
+	hook := newMemoryHook(store, func() string { return "session-test" }, withActiveMemoryKeywordExtractor(extractor))
+	run := agent.NewRunContext("这个缓存呢", agent.RunModeSync)
+
+	if err := hook.BeforeModelCall(context.Background(), run); err != nil {
+		t.Fatalf("before model call: %v", err)
+	}
+	if err := hook.BeforeModelCall(context.Background(), run); err != nil {
+		t.Fatalf("before model call again: %v", err)
+	}
+
+	rendered := run.RuntimeContextText()
+	if !strings.Contains(rendered, "Redis cache TTL") ||
+		!strings.Contains(rendered, "Query mode: ai_recent") ||
+		!strings.Contains(rendered, "Keywords: redis cache, ttl") {
+		t.Fatalf("active memory did not use AI keyword recall:\n%s", rendered)
+	}
+	if extractor.calls != 1 {
+		t.Fatalf("keyword extractor calls = %d, want 1", extractor.calls)
+	}
+}
+
 func TestMemoryStoreCapturesToolMemoryAndRecallsByQuery(t *testing.T) {
 	root := t.TempDir()
 	store := newMemoryStore(root)
@@ -201,4 +393,15 @@ func TestToolMemoryHookDefersSummaryUntilRunFinishes(t *testing.T) {
 	if !strings.Contains(after, "Relevant tool memory:") {
 		t.Fatalf("tool memory should be visible after run finishes:\n%s", after)
 	}
+}
+
+type fakeActiveMemoryKeywordExtractor struct {
+	result activeMemoryKeywordResult
+	err    error
+	calls  int
+}
+
+func (f *fakeActiveMemoryKeywordExtractor) ExtractActiveMemoryKeywords(ctx context.Context, input activeMemoryKeywordInput) (activeMemoryKeywordResult, error) {
+	f.calls++
+	return f.result, f.err
 }

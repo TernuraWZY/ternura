@@ -190,7 +190,13 @@ func (r *einoAgentRun) applyToolPolicyContext(policy ToolPolicy) {
 	if r.runCtx == nil {
 		return
 	}
-	r.runCtx.SetContextBlock("tool-policy", "Tool Policy", toolPolicyGuidance(policy))
+	r.runCtx.SetContextBlockWithPriority(
+		"tool-policy",
+		"Tool Policy",
+		toolPolicyGuidance(policy),
+		RuntimeContextPriorityCritical,
+		2000,
+	)
 }
 
 func toolPolicyGuidance(policy ToolPolicy) string {

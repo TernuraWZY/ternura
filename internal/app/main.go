@@ -59,15 +59,16 @@ func Run() {
 }
 
 type agentServer struct {
-	modelConf config.ModelConfig
-	mu        sync.Mutex
-	agent     *agent.Agent
-	store     *sessionStore
-	memory    *memoryStore
-	cron      *cron.Service
-	cronTool  *tool.CronTool
-	cronWake  chan struct{}
-	feishu    *feishu.Service
+	modelConf            config.ModelConfig
+	mu                   sync.Mutex
+	agent                *agent.Agent
+	store                *sessionStore
+	memory               *memoryStore
+	activeMemoryKeywords activeMemoryKeywordExtractor
+	cron                 *cron.Service
+	cronTool             *tool.CronTool
+	cronWake             chan struct{}
+	feishu               *feishu.Service
 }
 
 func newAgentServer(modelConf config.ModelConfig) *agentServer {
@@ -77,6 +78,7 @@ func newAgentServer(modelConf config.ModelConfig) *agentServer {
 		cronWake:  make(chan struct{}, 1),
 	}
 	s.memory = newMemoryStore(s.store.root)
+	s.activeMemoryKeywords = newEinoActiveMemoryKeywordExtractor(modelConf)
 	s.cron = cron.NewService(s.store.root)
 	s.cronTool = tool.NewCronTool(s.cronAdd, s.cronList, s.cronRemove)
 	feishuConfig := feishu.NewConfigFromEnv()
@@ -153,7 +155,7 @@ func (s *agentServer) resetAgent() {
 		newAgentTools(s.updateTodos, s.rememberMemory, s.forgetMemory, s.cronTool),
 		agent.WithHooks(
 			newCurrentTimeHook(),
-			newMemoryHook(s.memory, s.store.CurrentSessionID),
+			newMemoryHook(s.memory, s.store.CurrentSessionID, withActiveMemoryKeywordExtractor(s.activeMemoryKeywords)),
 			newToolMemoryHook(s.memory, s.store.CurrentSessionID),
 			newScheduleGuidanceHook(),
 			newStateGuardHook(s.cron),

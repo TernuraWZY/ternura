@@ -109,6 +109,61 @@ func TestContextBuilderBuildDropsHistoricalToolExchangeBeforeLatestUser(t *testi
 	}
 }
 
+func TestContextBuilderBuildBudgetsRuntimeContextBlocks(t *testing.T) {
+	input := []*schema.Message{
+		schema.SystemMessage("system"),
+		schema.UserMessage("hello"),
+	}
+	runCtx := NewRunContext("hello", RunModeSync)
+	runCtx.SetContextBlockWithPriority("memory", "Memory", strings.Repeat("M", 140), RuntimeContextPriorityNormal, 90)
+	runCtx.SetContextBlockWithPriority("policy", "Tool Policy", "must call cron", RuntimeContextPriorityCritical, 0)
+	builder := NewContextBuilder("system")
+	builder.runtimeContextBudgetRunes = 140
+
+	messages, err := builder.Build(context.Background(), runCtx, input)
+
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	system := messages[0].Content
+	if !strings.Contains(system, "## Tool Policy") || !strings.Contains(system, "must call cron") {
+		t.Fatalf("critical context should be preserved:\n%s", system)
+	}
+	if !strings.Contains(system, "## Memory") {
+		t.Fatalf("memory context should still be included when it fits:\n%s", system)
+	}
+	if strings.Count(system, "M") >= 140 || !strings.Contains(system, "truncated") {
+		t.Fatalf("memory context was not budgeted:\n%s", system)
+	}
+	if strings.Index(system, "## Tool Policy") > strings.Index(system, "## Memory") {
+		t.Fatalf("higher-priority block should be rendered first:\n%s", system)
+	}
+}
+
+func TestContextBuilderBuildPrunesOldConversationByBudget(t *testing.T) {
+	input := []*schema.Message{
+		schema.SystemMessage("system"),
+		schema.UserMessage("old user " + strings.Repeat("A", 80)),
+		schema.AssistantMessage("old assistant "+strings.Repeat("B", 80), nil),
+		schema.UserMessage("current question"),
+	}
+	builder := NewContextBuilder("system")
+	builder.maxInputRunes = 120
+	builder.conversationBudgetRunes = 20
+
+	messages, err := builder.Build(context.Background(), nil, input)
+
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	if !containsUserContent(messages, "current question") {
+		t.Fatalf("current user message must be preserved: %+v", messages)
+	}
+	if containsUserContent(messages, "old user") || containsAssistantContentPrefix(messages, "old assistant") {
+		t.Fatalf("old conversation should be pruned by budget: %+v", messages)
+	}
+}
+
 func hasAssistantToolCall(messages []*schema.Message, callID string) bool {
 	for _, message := range messages {
 		if message == nil || message.Role != schema.Assistant {
@@ -126,6 +181,24 @@ func hasAssistantToolCall(messages []*schema.Message, callID string) bool {
 func containsAssistantContent(messages []*schema.Message, content string) bool {
 	for _, message := range messages {
 		if message != nil && message.Role == schema.Assistant && message.Content == content {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAssistantContentPrefix(messages []*schema.Message, content string) bool {
+	for _, message := range messages {
+		if message != nil && message.Role == schema.Assistant && strings.HasPrefix(message.Content, content) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsUserContent(messages []*schema.Message, content string) bool {
+	for _, message := range messages {
+		if message != nil && message.Role == schema.User && strings.Contains(message.Content, content) {
 			return true
 		}
 	}
