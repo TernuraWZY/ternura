@@ -244,23 +244,7 @@ func (s *agentServer) newAgentForSession(sessionID string) *agent.Agent {
 }
 
 func (s *agentServer) newAgentForSessionWithCron(sessionID string, cronTool *tool.CronTool) *agent.Agent {
-	sessionAgent := agent.NewAgent(
-		s.modelConf,
-		agent.TernuraAgentSystemPrompt,
-		newAgentTools(
-			s.updateTodosForSession(sessionID),
-			s.rememberMemory,
-			s.forgetMemory,
-			cronTool,
-		),
-		agent.WithHooks(
-			newCurrentTimeHook(),
-			newMemoryHook(s.memory, func() string { return sessionID }, withActiveMemoryKeywordExtractor(s.activeMemoryKeywords)),
-			newToolMemoryHook(s.memory, func() string { return sessionID }),
-			newScheduleGuidanceHook(),
-			newStateGuardHook(s.cron),
-		),
-	)
+	sessionAgent := newAgentFromSkillRegistry(s.modelConf, s.newSkillRegistry(sessionID, cronTool))
 
 	snapshot := s.store.Snapshot()
 	if session := findSession(snapshot.Sessions, sessionID); session != nil && len(session.Messages) > 0 {

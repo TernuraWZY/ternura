@@ -7,25 +7,6 @@ import (
 	"ternura/tool"
 )
 
-func newAgentTools(
-	updateTodos tool.UpdateTodosFunc,
-	remember tool.RememberFunc,
-	forgetMemory tool.ForgetMemoryFunc,
-	cronTool *tool.CronTool,
-) []tool.Tool {
-	return []tool.Tool{
-		tool.NewReadTool(),
-		tool.NewEditTool(),
-		tool.NewWriteTool(),
-		tool.NewBashTool(),
-		tool.NewUpdateTodosTool(updateTodos),
-		tool.NewRememberTool(remember),
-		tool.NewForgetMemoryTool(forgetMemory),
-		cronTool,
-		tool.NewWebFetchTool(),
-	}
-}
-
 func (s *agentServer) updateTodos(ctx context.Context, todos []tool.TodoItem) error {
 	return s.updateTodosForSession("")(ctx, todos)
 }

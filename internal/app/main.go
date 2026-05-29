@@ -45,11 +45,7 @@ func Run() {
 		return
 	}
 
-	cliAgent := agent.NewAgent(
-		modelConf,
-		agent.TernuraAgentSystemPrompt,
-		newAgentTools(nil, nil, nil, tool.NewCronTool(nil, nil, nil)),
-	)
+	cliAgent := newAgentFromSkillRegistry(modelConf, newCLISkillRegistry(tool.NewCronTool(nil, nil, nil)))
 	result, err := cliAgent.RunWithTrace(ctx, *query)
 	if err != nil {
 		log.Printf("agent run error: %v", err)
@@ -153,18 +149,7 @@ func logRunFinish(run runLifecycle, status string, finishedAt time.Time) {
 }
 
 func (s *agentServer) resetAgent() {
-	s.agent = agent.NewAgent(
-		s.modelConf,
-		agent.TernuraAgentSystemPrompt,
-		newAgentTools(s.updateTodos, s.rememberMemory, s.forgetMemory, s.cronTool),
-		agent.WithHooks(
-			newCurrentTimeHook(),
-			newMemoryHook(s.memory, s.store.CurrentSessionID, withActiveMemoryKeywordExtractor(s.activeMemoryKeywords)),
-			newToolMemoryHook(s.memory, s.store.CurrentSessionID),
-			newScheduleGuidanceHook(),
-			newStateGuardHook(s.cron),
-		),
-	)
+	s.agent = newAgentFromSkillRegistry(s.modelConf, s.newSkillRegistry("", s.cronTool))
 }
 
 func (s *agentServer) resetAgentFromHistory() {
