@@ -225,10 +225,6 @@ func (s *sessionStore) FinishRunForSession(sessionID string, run runLifecycle, u
 	return s.finishRunLocked(sessionID, run, userMessage, userMessage, runTriggerKindUser, result, status, finishedAt, runErr)
 }
 
-func (s *sessionStore) FinishRunForSessionWithRuntimeMessage(sessionID string, run runLifecycle, displayMessage string, runtimeMessage string, result agent.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
-	return s.finishRunLocked(sessionID, run, displayMessage, runtimeMessage, runTriggerKindUser, result, status, finishedAt, runErr)
-}
-
 // FinishScheduledRunForSession 把定时触发的 run 写回 session：
 //   - displayPrompt 写入 run.UserMessage，让外部端展示自然语言的提醒文本；
 //   - runtimePrompt 才是真正塞进 LLM messages 历史的 user 内容（一般是带 "[cron job fired]" 前缀的包装版本），
