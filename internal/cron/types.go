@@ -13,12 +13,11 @@ const (
 	RunStatusError   = "error"
 	RunStatusSkipped = "skipped"
 
-	// Legacy statuses are kept for migrated schedule data and guard logic.
-	LegacyScheduled = "scheduled"
-	LegacyRunning   = "running"
-	LegacyCompleted = "completed"
-	LegacyCancelled = "cancelled"
-	LegacyFailed    = "failed"
+	TaskStatusScheduled = "scheduled"
+	TaskStatusRunning   = "running"
+	TaskStatusCompleted = "completed"
+	TaskStatusCancelled = "cancelled"
+	TaskStatusFailed    = "failed"
 )
 
 // Schedule 定义任务何时触发，对应 nanobot CronSchedule。
@@ -98,20 +97,4 @@ type AddParams struct {
 	TZ             string
 	At             string // ISO datetime
 	DelaySeconds   int    // 相对延迟，映射为 at
-}
-
-// LegacyTask keeps the old schedule projection for migrated data and guard logic.
-type LegacyTask struct {
-	ID         string `json:"id"`
-	Title      string `json:"title"`
-	Prompt     string `json:"prompt"`
-	SessionID  string `json:"session_id"`
-	Status     string `json:"status"`
-	RunAt      string `json:"run_at"`
-	CreatedAt  string `json:"created_at"`
-	UpdatedAt  string `json:"updated_at"`
-	StartedAt  string `json:"started_at,omitempty"`
-	FinishedAt string `json:"finished_at,omitempty"`
-	LastRunID  string `json:"last_run_id,omitempty"`
-	LastError  string `json:"last_error,omitempty"`
 }

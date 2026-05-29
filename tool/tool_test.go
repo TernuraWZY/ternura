@@ -33,6 +33,12 @@ func TestAgentToolSchemaInferredFromTags(t *testing.T) {
 			required: "todos",
 			property: "todos",
 		},
+		{
+			name:     AgentToolWebFetch,
+			tool:     NewWebFetchTool(),
+			required: "url",
+			property: "url",
+		},
 	}
 
 	for _, tt := range tests {

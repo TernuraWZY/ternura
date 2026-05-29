@@ -128,9 +128,9 @@ func (h *stateGuardHook) knownCronJobIDSet() map[string]struct{} {
 	if h == nil || h.cron == nil {
 		return ids
 	}
-	for _, task := range h.cron.LegacySnapshot() {
-		if task.ID != "" {
-			ids[task.ID] = struct{}{}
+	for _, job := range h.cron.List(true) {
+		if job.ID != "" {
+			ids[job.ID] = struct{}{}
 		}
 	}
 	return ids

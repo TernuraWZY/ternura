@@ -15,20 +15,18 @@ import (
 
 // Service 管理 cron 任务的持久化与调度，设计参考 nanobot CronService。
 type Service struct {
-	mu         sync.Mutex
-	root       string
-	storePath  string
-	legacyPath string
-	file       storeFile
-	running    bool
+	mu        sync.Mutex
+	root      string
+	storePath string
+	file      storeFile
+	running   bool
 }
 
 func NewService(root string) *Service {
 	cronDir := filepath.Join(root, "cron")
 	return &Service{
-		root:       root,
-		storePath:  filepath.Join(cronDir, "jobs.json"),
-		legacyPath: filepath.Join(root, "schedules.json"),
+		root:      root,
+		storePath: filepath.Join(cronDir, "jobs.json"),
 		file: storeFile{
 			Version: StoreVersion,
 			Jobs:    make([]Job, 0),
@@ -50,9 +48,7 @@ func (s *Service) Load() error {
 	case err == nil:
 		s.file = normalizeStore(file)
 	case errors.Is(err, os.ErrNotExist):
-		if migrateErr := s.migrateLegacyLocked(); migrateErr != nil {
-			return migrateErr
-		}
+		s.file = normalizeStore(storeFile{Version: StoreVersion, Jobs: make([]Job, 0)})
 	default:
 		backup := s.storePath + fmt.Sprintf(".corrupt-%d", time.Now().Unix())
 		_ = os.Rename(s.storePath, backup)
@@ -213,15 +209,6 @@ func (s *Service) Get(id string) (Job, bool) {
 		return Job{}, false
 	}
 	return *job, true
-}
-
-func (s *Service) LegacySnapshot() []LegacyTask {
-	jobs := s.List(true)
-	out := make([]LegacyTask, 0, len(jobs))
-	for _, job := range jobs {
-		out = append(out, job.ToLegacyTask())
-	}
-	return out
 }
 
 func (s *Service) NextWakeDuration(now time.Time) time.Duration {

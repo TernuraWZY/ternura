@@ -45,7 +45,11 @@ func Run() {
 		return
 	}
 
-	cliAgent := agent.NewAgent(modelConf, agent.TernuraAgentSystemPrompt, newAgentTools(nil, nil, nil, tool.NewCronTool(nil, nil, nil)))
+	cliAgent := agent.NewAgent(
+		modelConf,
+		agent.TernuraAgentSystemPrompt,
+		newAgentTools(nil, nil, nil, tool.NewCronTool(nil, nil, nil)),
+	)
 	result, err := cliAgent.RunWithTrace(ctx, *query)
 	if err != nil {
 		log.Printf("agent run error: %v", err)
@@ -67,6 +71,7 @@ type agentServer struct {
 	activeMemoryKeywords activeMemoryKeywordExtractor
 	planStore            *planStore
 	planner              planGenerator
+	planDecider          planDecider
 	cron                 *cron.Service
 	cronTool             *tool.CronTool
 	cronWake             chan struct{}
@@ -82,7 +87,9 @@ func newAgentServer(modelConf config.ModelConfig) *agentServer {
 	s.memory = newMemoryStore(s.store.root)
 	s.activeMemoryKeywords = newEinoActiveMemoryKeywordExtractor(modelConf)
 	s.planStore = newPlanStore(s.store.root)
-	s.planner = newEinoPlanGenerator(modelConf)
+	planController := newEinoPlanController(modelConf)
+	s.planner = planController
+	s.planDecider = planController
 	s.cron = cron.NewService(s.store.root)
 	s.cronTool = tool.NewCronTool(s.cronAdd, s.cronList, s.cronRemove)
 	feishuConfig := feishu.NewConfigFromEnv()

@@ -38,7 +38,10 @@ func TestPlanStorePersistsPendingPlan(t *testing.T) {
 }
 
 func TestPlanFlowStartsPendingPlan(t *testing.T) {
-	server := testPlanServer(t, []string{"## 目标\n重构 cron\n\n## 执行步骤\n1. 阅读代码\n2. 修改代码"})
+	server := testPlanServer(t,
+		[]string{"## 目标\n重构 cron\n\n## 执行步骤\n1. 阅读代码\n2. 修改代码"},
+		[]planRoutingDecision{{Action: planRouteStart, Task: "帮我重构 cron"}},
+	)
 
 	decision, err := server.handlePlanFlow(context.Background(), "session-test", "plan 帮我重构 cron")
 	if err != nil {
@@ -60,7 +63,13 @@ func TestPlanFlowStartsPendingPlan(t *testing.T) {
 }
 
 func TestPlanFlowApprovesPendingPlanForExecution(t *testing.T) {
-	server := testPlanServer(t, []string{"## 目标\n检查代码\n\n## 执行步骤\n1. 读文件\n2. 总结"})
+	server := testPlanServer(t,
+		[]string{"## 目标\n检查代码\n\n## 执行步骤\n1. 读文件\n2. 总结"},
+		[]planRoutingDecision{
+			{Action: planRouteStart, Task: "帮我检查代码"},
+			{Action: planRouteApprove},
+		},
+	)
 	if _, err := server.handlePlanFlow(context.Background(), "session-test", "plan 帮我检查代码"); err != nil {
 		t.Fatalf("start plan: %v", err)
 	}
@@ -87,10 +96,16 @@ func TestPlanFlowApprovesPendingPlanForExecution(t *testing.T) {
 }
 
 func TestPlanFlowRevisesPendingPlan(t *testing.T) {
-	server := testPlanServer(t, []string{
-		"## 目标\n初版\n\n## 执行步骤\n1. 读代码",
-		"## 目标\n新版\n\n## 执行步骤\n1. 先跑测试\n2. 再改代码",
-	})
+	server := testPlanServer(t,
+		[]string{
+			"## 目标\n初版\n\n## 执行步骤\n1. 读代码",
+			"## 目标\n新版\n\n## 执行步骤\n1. 先跑测试\n2. 再改代码",
+		},
+		[]planRoutingDecision{
+			{Action: planRouteStart, Task: "帮我改代码"},
+			{Action: planRouteRevise, Feedback: "先跑测试"},
+		},
+	)
 	if _, err := server.handlePlanFlow(context.Background(), "session-test", "plan 帮我改代码"); err != nil {
 		t.Fatalf("start plan: %v", err)
 	}
@@ -117,10 +132,16 @@ func TestPlanFlowRevisesPendingPlan(t *testing.T) {
 }
 
 func TestPlanFlowTreatsGoTestAsFeedbackNotApproval(t *testing.T) {
-	server := testPlanServer(t, []string{
-		"## 目标\n初版\n\n## 执行步骤\n1. 改代码",
-		"## 目标\n新版\n\n## 执行步骤\n1. 先跑 go test\n2. 再改代码",
-	})
+	server := testPlanServer(t,
+		[]string{
+			"## 目标\n初版\n\n## 执行步骤\n1. 改代码",
+			"## 目标\n新版\n\n## 执行步骤\n1. 先跑 go test\n2. 再改代码",
+		},
+		[]planRoutingDecision{
+			{Action: planRouteStart, Task: "帮我改代码"},
+			{Action: planRouteRevise, Feedback: "先跑 go test"},
+		},
+	)
 	if _, err := server.handlePlanFlow(context.Background(), "session-test", "plan 帮我改代码"); err != nil {
 		t.Fatalf("start plan: %v", err)
 	}
@@ -143,7 +164,13 @@ func TestPlanFlowTreatsGoTestAsFeedbackNotApproval(t *testing.T) {
 }
 
 func TestPlanFlowCancelsPendingPlan(t *testing.T) {
-	server := testPlanServer(t, []string{"## 目标\n删除文件\n\n## 执行步骤\n1. 检查\n2. 删除"})
+	server := testPlanServer(t,
+		[]string{"## 目标\n删除文件\n\n## 执行步骤\n1. 检查\n2. 删除"},
+		[]planRoutingDecision{
+			{Action: planRouteStart, Task: "删除文件"},
+			{Action: planRouteCancel},
+		},
+	)
 	if _, err := server.handlePlanFlow(context.Background(), "session-test", "plan 删除文件"); err != nil {
 		t.Fatalf("start plan: %v", err)
 	}
@@ -161,26 +188,37 @@ func TestPlanFlowCancelsPendingPlan(t *testing.T) {
 	}
 }
 
-func TestMessageRequestsPlan(t *testing.T) {
-	for _, message := range []string{"plan 帮我改代码", "PLAN: refactor cron", "plan帮我改代码", "先做计划 帮我优化工具", "计划一下怎么做"} {
-		if !messageRequestsPlan(message) {
-			t.Fatalf("message should request plan: %q", message)
-		}
+func TestPlanFlowIgnoresWhenRouterChoosesIgnore(t *testing.T) {
+	server := testPlanServer(t, nil, []planRoutingDecision{{Action: planRouteIgnore}})
+
+	decision, err := server.handlePlanFlow(context.Background(), "session-test", "帮我改代码")
+	if err != nil {
+		t.Fatalf("handle plan flow: %v", err)
 	}
-	for _, message := range []string{"帮我改代码", "解释一下 agent"} {
-		if messageRequestsPlan(message) {
-			t.Fatalf("message should not request plan: %q", message)
-		}
+
+	if decision.Handled || decision.Execute {
+		t.Fatalf("decision = %+v, want unhandled", decision)
 	}
 }
 
-func testPlanServer(t *testing.T, plans []string) *agentServer {
+func TestParsePlanRoutingDecisionExtractsJSON(t *testing.T) {
+	decision, err := parsePlanRoutingDecision("```json\n{\"action\":\"start\",\"task\":\"帮我改代码\",\"reason\":\"asked for plan\"}\n```")
+	if err != nil {
+		t.Fatalf("parse decision: %v", err)
+	}
+	if decision.Action != planRouteStart || decision.Task != "帮我改代码" {
+		t.Fatalf("decision = %+v", decision)
+	}
+}
+
+func testPlanServer(t *testing.T, plans []string, decisions []planRoutingDecision) *agentServer {
 	t.Helper()
 	root := t.TempDir()
 	return &agentServer{
-		store:     newSessionStore(filepath.Join(root, "session.json")),
-		planStore: newPlanStore(root),
-		planner:   &fakePlanGenerator{plans: plans},
+		store:       newSessionStore(filepath.Join(root, "session.json")),
+		planStore:   newPlanStore(root),
+		planner:     &fakePlanGenerator{plans: plans},
+		planDecider: &fakePlanDecider{decisions: decisions},
 	}
 }
 
@@ -199,4 +237,21 @@ func (f *fakePlanGenerator) GeneratePlan(ctx context.Context, input planGenerati
 	}
 	f.calls++
 	return f.plans[idx], nil
+}
+
+type fakePlanDecider struct {
+	decisions []planRoutingDecision
+	calls     int
+}
+
+func (f *fakePlanDecider) DecidePlanRoute(ctx context.Context, input planRoutingInput) (planRoutingDecision, error) {
+	if len(f.decisions) == 0 {
+		return planRoutingDecision{Action: planRouteIgnore}, nil
+	}
+	idx := f.calls
+	if idx >= len(f.decisions) {
+		idx = len(f.decisions) - 1
+	}
+	f.calls++
+	return f.decisions[idx], nil
 }

@@ -22,6 +22,7 @@ func newAgentTools(
 		tool.NewRememberTool(remember),
 		tool.NewForgetMemoryTool(forgetMemory),
 		cronTool,
+		tool.NewWebFetchTool(),
 	}
 }
 

@@ -80,24 +80,21 @@ func TestServiceClaimDueCompletesOneShot(t *testing.T) {
 	}
 }
 
-func TestServiceMigratesLegacySchedulesJSON(t *testing.T) {
+func TestServiceIgnoresLegacySchedulesJSON(t *testing.T) {
 	root := t.TempDir()
 	legacyPath := filepath.Join(root, "schedules.json")
-	legacy := `{
-  "version": 1,
-  "tasks": [{
-    "id": "schedule-legacy",
-    "title": "legacy task",
-    "prompt": "do thing",
-    "session_id": "session-1",
-    "status": "scheduled",
-    "run_at": "2099-01-01T09:00:00+08:00",
-    "created_at": "2026-05-21T09:00:00+08:00",
-    "updated_at": "2026-05-21T09:00:00+08:00"
-  }]
-}`
-	if err := os.WriteFile(legacyPath, []byte(legacy), 0o644); err != nil {
-		t.Fatalf("write legacy: %v", err)
+	if err := os.WriteFile(legacyPath, []byte(`[
+		{
+			"id": "legacy-1",
+			"name": "Legacy check",
+			"message": "this should not be migrated",
+			"session_id": "session-legacy",
+			"status": "scheduled",
+			"next_run_at_ms": 32503680000000,
+			"delete_after_run": true
+		}
+	]`), 0o644); err != nil {
+		t.Fatalf("write legacy file: %v", err)
 	}
 
 	svc := cron.NewService(root)
@@ -105,7 +102,7 @@ func TestServiceMigratesLegacySchedulesJSON(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	jobs := svc.List(true)
-	if len(jobs) != 1 || jobs[0].ID != "schedule-legacy" {
+	if len(jobs) != 0 {
 		t.Fatalf("jobs = %+v", jobs)
 	}
 }

@@ -202,9 +202,8 @@ func (s *agentServer) cronList(ctx context.Context) (string, error) {
 	lines := make([]string, 0, len(jobs)+1)
 	lines = append(lines, "Scheduled jobs:")
 	for _, job := range jobs {
-		legacy := job.ToLegacyTask()
 		timing := formatCronTiming(job)
-		line := fmt.Sprintf("- %s (id: %s, %s, status: %s)", job.Name, job.ID, timing, legacy.Status)
+		line := fmt.Sprintf("- %s (id: %s, %s, status: %s)", job.Name, job.ID, timing, job.Status())
 		if job.State.NextRunAtMS > 0 {
 			line += fmt.Sprintf(", next: %s", time.UnixMilli(job.State.NextRunAtMS).Format(time.RFC3339))
 		}

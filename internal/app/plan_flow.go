@@ -2,9 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
-	"regexp"
 	"strings"
 	"time"
 
@@ -28,10 +28,41 @@ Output Chinese Markdown only, with:
 
 Keep it specific and actionable. Do not claim that any step has already been done.`
 
-var planKeywordPattern = regexp.MustCompile(`(?i)(^|[\s[:punct:]])plan([\s[:punct:]]|$)`)
+const planRouteSystemPrompt = `You are Ternura's plan-mode router.
+
+Decide whether the user's message should be handled by Plan Mode.
+Plan Mode means: first create or revise a plan, wait for user approval, and only execute after approval.
+
+Return JSON only, with this schema:
+{
+  "action": "ignore" | "start" | "approve" | "cancel" | "revise",
+  "task": "task to plan when action=start",
+  "feedback": "revision request when action=revise",
+  "reason": "brief internal reason"
+}
+
+Rules:
+- If there is no pending plan, use "start" only when the user clearly wants a plan/approval gate before execution.
+- If there is no pending plan and the user is asking a normal question or task, use "ignore".
+- If there is a pending plan, use "approve" only when the user clearly authorizes execution.
+- If there is a pending plan, use "cancel" only when the user wants to abandon the pending plan.
+- If there is a pending plan and the user asks to adjust the plan, use "revise".
+- If there is a pending plan but the message is unrelated to that pending plan, use "ignore".
+- Do not execute the task yourself. Only classify the user's intent.
+- The "task" should remove plan-mode trigger words and keep the actual task.
+- The "feedback" should preserve the user's requested change.`
+
+type planController interface {
+	planGenerator
+	planDecider
+}
 
 type planGenerator interface {
 	GeneratePlan(ctx context.Context, input planGenerationInput) (string, error)
+}
+
+type planDecider interface {
+	DecidePlanRoute(ctx context.Context, input planRoutingInput) (planRoutingDecision, error)
 }
 
 type planGenerationInput struct {
@@ -40,7 +71,29 @@ type planGenerationInput struct {
 	Feedback     string
 }
 
-type einoPlanGenerator struct {
+type planRouteAction string
+
+const (
+	planRouteIgnore  planRouteAction = "ignore"
+	planRouteStart   planRouteAction = "start"
+	planRouteApprove planRouteAction = "approve"
+	planRouteCancel  planRouteAction = "cancel"
+	planRouteRevise  planRouteAction = "revise"
+)
+
+type planRoutingInput struct {
+	Message string
+	Pending *pendingPlan
+}
+
+type planRoutingDecision struct {
+	Action   planRouteAction `json:"action"`
+	Task     string          `json:"task,omitempty"`
+	Feedback string          `json:"feedback,omitempty"`
+	Reason   string          `json:"reason,omitempty"`
+}
+
+type einoPlanController struct {
 	model einomodel.BaseChatModel
 }
 
@@ -54,22 +107,22 @@ type planFlowDecision struct {
 	OriginalPlanTask string
 }
 
-func newEinoPlanGenerator(modelConf config.ModelConfig) planGenerator {
+func newEinoPlanController(modelConf config.ModelConfig) planController {
 	model, err := einoopenai.NewChatModel(context.Background(), &einoopenai.ChatModelConfig{
 		BaseURL: modelConf.BaseURL,
 		APIKey:  modelConf.ApiKey,
 		Model:   modelConf.Model,
 	})
 	if err != nil {
-		log.Printf("create plan generator model: %v", err)
-		return fallbackPlanGenerator{}
+		log.Printf("create plan controller model: %v", err)
+		return fallbackPlanController{}
 	}
-	return &einoPlanGenerator{model: model}
+	return &einoPlanController{model: model}
 }
 
-func (g *einoPlanGenerator) GeneratePlan(ctx context.Context, input planGenerationInput) (string, error) {
+func (g *einoPlanController) GeneratePlan(ctx context.Context, input planGenerationInput) (string, error) {
 	if g == nil || g.model == nil {
-		return "", errors.New("plan generator model is not initialized")
+		return "", errors.New("plan controller model is not initialized")
 	}
 	message, err := g.model.Generate(ctx, []*schema.Message{
 		schema.SystemMessage(planSystemPrompt),
@@ -84,14 +137,42 @@ func (g *einoPlanGenerator) GeneratePlan(ctx context.Context, input planGenerati
 	return strings.TrimSpace(message.Content), nil
 }
 
-type fallbackPlanGenerator struct{}
+func (g *einoPlanController) DecidePlanRoute(ctx context.Context, input planRoutingInput) (planRoutingDecision, error) {
+	if g == nil || g.model == nil {
+		return planRoutingDecision{}, errors.New("plan controller model is not initialized")
+	}
+	message, err := g.model.Generate(ctx, []*schema.Message{
+		schema.SystemMessage(planRouteSystemPrompt),
+		schema.UserMessage(renderPlanRoutingPrompt(input)),
+	})
+	if err != nil {
+		return planRoutingDecision{}, err
+	}
+	if message == nil {
+		return planRoutingDecision{}, errors.New("plan router returned nil message")
+	}
+	return parsePlanRoutingDecision(message.Content)
+}
 
-func (fallbackPlanGenerator) GeneratePlan(_ context.Context, input planGenerationInput) (string, error) {
+type fallbackPlanController struct{}
+
+func (fallbackPlanController) GeneratePlan(_ context.Context, input planGenerationInput) (string, error) {
 	task := strings.TrimSpace(input.Task)
 	if task == "" {
 		task = "用户请求的任务"
 	}
 	return strings.TrimSpace("## 目标\n" + task + "\n\n## 执行步骤\n1. 明确任务目标和约束。\n2. 检查相关上下文或项目文件。\n3. 按计划执行必要操作。\n4. 验证结果并向用户说明。\n\n## 需要确认的风险或假设\n- 需要你确认后才会真正执行。"), nil
+}
+
+func (fallbackPlanController) DecidePlanRoute(_ context.Context, input planRoutingInput) (planRoutingDecision, error) {
+	if input.Pending != nil {
+		return planRoutingDecision{
+			Action:   planRouteRevise,
+			Feedback: strings.TrimSpace(input.Message),
+			Reason:   "fallback treats pending-plan replies as revision feedback",
+		}, nil
+	}
+	return planRoutingDecision{Action: planRouteIgnore, Reason: "fallback cannot infer plan intent"}, nil
 }
 
 func renderPlanGenerationPrompt(input planGenerationInput) string {
@@ -105,6 +186,23 @@ func renderPlanGenerationPrompt(input planGenerationInput) string {
 	return strings.Join(sections, "\n")
 }
 
+func renderPlanRoutingPrompt(input planRoutingInput) string {
+	sections := []string{"User message:", strings.TrimSpace(input.Message)}
+	if input.Pending == nil {
+		sections = append(sections, "", "Pending plan: none")
+		return strings.Join(sections, "\n")
+	}
+	sections = append(sections,
+		"",
+		"Pending plan:",
+		"ID: "+input.Pending.ID,
+		"Task: "+input.Pending.Task,
+		"Plan:",
+		input.Pending.Plan,
+	)
+	return strings.Join(sections, "\n")
+}
+
 func (s *agentServer) handlePlanFlow(ctx context.Context, sessionID string, message string) (planFlowDecision, error) {
 	if s == nil || s.planStore == nil {
 		return planFlowDecision{}, nil
@@ -114,21 +212,50 @@ func (s *agentServer) handlePlanFlow(ctx context.Context, sessionID string, mess
 	if err != nil {
 		return planFlowDecision{}, err
 	}
+	var pendingPtr *pendingPlan
 	if hasPending {
-		return s.handlePendingPlan(ctx, pending, message)
+		pendingPtr = &pending
 	}
-	if !messageRequestsPlan(message) {
+
+	route, err := s.decidePlanRoute(ctx, planRoutingInput{Message: message, Pending: pendingPtr})
+	if err != nil {
+		return planFlowDecision{}, err
+	}
+	switch route.Action {
+	case planRouteIgnore:
+		return planFlowDecision{}, nil
+	case planRouteStart:
+		return s.startPlan(ctx, sessionID, message, route.Task)
+	case planRouteApprove:
+		if !hasPending {
+			return planFlowDecision{}, nil
+		}
+		return s.approvePendingPlan(pending)
+	case planRouteCancel:
+		if !hasPending {
+			return planFlowDecision{}, nil
+		}
+		return s.cancelPendingPlan(pending)
+	case planRouteRevise:
+		if !hasPending {
+			return planFlowDecision{}, nil
+		}
+		feedback := strings.TrimSpace(route.Feedback)
+		if feedback == "" {
+			feedback = message
+		}
+		return s.revisePendingPlan(ctx, pending, feedback)
+	default:
 		return planFlowDecision{}, nil
 	}
-	return s.startPlan(ctx, sessionID, message)
 }
 
-func (s *agentServer) startPlan(ctx context.Context, sessionID string, message string) (planFlowDecision, error) {
-	task := stripPlanKeyword(message)
+func (s *agentServer) startPlan(ctx context.Context, sessionID string, message string, task string) (planFlowDecision, error) {
 	if strings.TrimSpace(task) == "" {
-		result := agent.AgentRunResult{Content: "可以。请把 `plan` 和你要我执行的任务放在同一条消息里，例如：`plan 帮我重构 cron 模块`。"}
+		result := agent.AgentRunResult{Content: "可以，我会先做计划再等你确认。请补充你希望我规划的具体任务。"}
 		return planFlowDecision{Handled: true, Result: result}, nil
 	}
+	task = strings.TrimSpace(task)
 
 	planText, err := s.generatePlan(ctx, planGenerationInput{Task: task})
 	if err != nil {
@@ -159,192 +286,119 @@ func (s *agentServer) startPlan(ctx context.Context, sessionID string, message s
 	}, nil
 }
 
-func (s *agentServer) handlePendingPlan(ctx context.Context, pending pendingPlan, message string) (planFlowDecision, error) {
-	switch classifyPlanResponse(message) {
-	case planResponseApprove:
-		if err := s.planStore.Clear(pending.SessionID); err != nil {
-			return planFlowDecision{}, err
-		}
-		return planFlowDecision{
-			Handled:          true,
-			Execute:          true,
-			RuntimeMessage:   buildApprovedPlanRuntimeMessage(pending),
-			ShortcutMessage:  pending.Task,
-			ApprovedPlanID:   pending.ID,
-			OriginalPlanTask: pending.Task,
-		}, nil
-	case planResponseCancel:
-		if err := s.planStore.Clear(pending.SessionID); err != nil {
-			return planFlowDecision{}, err
-		}
-		return planFlowDecision{
-			Handled: true,
-			Result: agent.AgentRunResult{
-				Content: "已取消这次待确认计划，不会执行任何操作。",
-				Trace: []agent.AgentTraceItem{{
-					Type:    "plan",
-					Title:   "Plan cancelled",
-					Content: pending.Plan,
-				}},
-			},
-		}, nil
-	default:
-		revisedPlan, err := s.generatePlan(ctx, planGenerationInput{
-			Task:         pending.Task,
-			ExistingPlan: pending.Plan,
-			Feedback:     message,
-		})
-		if err != nil {
-			return planFlowDecision{}, err
-		}
-		pending.Plan = revisedPlan
-		if err := s.planStore.Save(pending); err != nil {
-			return planFlowDecision{}, err
-		}
-		return planFlowDecision{
-			Handled: true,
-			Result: agent.AgentRunResult{
-				Content: "已根据你的反馈更新计划：\n\n" + formatPlanConfirmationReply(revisedPlan),
-				Trace: []agent.AgentTraceItem{{
-					Type:    "plan",
-					Title:   "Plan revised",
-					Content: revisedPlan,
-				}},
-			},
-		}, nil
+func (s *agentServer) approvePendingPlan(pending pendingPlan) (planFlowDecision, error) {
+	if err := s.planStore.Clear(pending.SessionID); err != nil {
+		return planFlowDecision{}, err
 	}
+	return planFlowDecision{
+		Handled:          true,
+		Execute:          true,
+		RuntimeMessage:   buildApprovedPlanRuntimeMessage(pending),
+		ShortcutMessage:  pending.Task,
+		ApprovedPlanID:   pending.ID,
+		OriginalPlanTask: pending.Task,
+	}, nil
+}
+
+func (s *agentServer) cancelPendingPlan(pending pendingPlan) (planFlowDecision, error) {
+	if err := s.planStore.Clear(pending.SessionID); err != nil {
+		return planFlowDecision{}, err
+	}
+	return planFlowDecision{
+		Handled: true,
+		Result: agent.AgentRunResult{
+			Content: "已取消这次待确认计划，不会执行任何操作。",
+			Trace: []agent.AgentTraceItem{{
+				Type:    "plan",
+				Title:   "Plan cancelled",
+				Content: pending.Plan,
+			}},
+		},
+	}, nil
+}
+
+func (s *agentServer) revisePendingPlan(ctx context.Context, pending pendingPlan, feedback string) (planFlowDecision, error) {
+	revisedPlan, err := s.generatePlan(ctx, planGenerationInput{
+		Task:         pending.Task,
+		ExistingPlan: pending.Plan,
+		Feedback:     feedback,
+	})
+	if err != nil {
+		return planFlowDecision{}, err
+	}
+	pending.Plan = revisedPlan
+	if err := s.planStore.Save(pending); err != nil {
+		return planFlowDecision{}, err
+	}
+	return planFlowDecision{
+		Handled: true,
+		Result: agent.AgentRunResult{
+			Content: "已根据你的反馈更新计划：\n\n" + formatPlanConfirmationReply(revisedPlan),
+			Trace: []agent.AgentTraceItem{{
+				Type:    "plan",
+				Title:   "Plan revised",
+				Content: revisedPlan,
+			}},
+		},
+	}, nil
+}
+
+func (s *agentServer) decidePlanRoute(ctx context.Context, input planRoutingInput) (planRoutingDecision, error) {
+	decider := planDecider(fallbackPlanController{})
+	if s != nil && s.planDecider != nil {
+		decider = s.planDecider
+	}
+	decision, err := decider.DecidePlanRoute(ctx, input)
+	if err != nil {
+		log.Printf("decide plan route: %v", err)
+		return fallbackPlanController{}.DecidePlanRoute(ctx, input)
+	}
+	return normalizePlanRoutingDecision(decision), nil
 }
 
 func (s *agentServer) generatePlan(ctx context.Context, input planGenerationInput) (string, error) {
 	if s == nil || s.planner == nil {
-		return fallbackPlanGenerator{}.GeneratePlan(ctx, input)
+		return fallbackPlanController{}.GeneratePlan(ctx, input)
 	}
 	planText, err := s.planner.GeneratePlan(ctx, input)
 	if err != nil {
 		log.Printf("generate plan: %v", err)
-		return fallbackPlanGenerator{}.GeneratePlan(ctx, input)
+		return fallbackPlanController{}.GeneratePlan(ctx, input)
 	}
 	if strings.TrimSpace(planText) == "" {
-		return fallbackPlanGenerator{}.GeneratePlan(ctx, input)
+		return fallbackPlanController{}.GeneratePlan(ctx, input)
 	}
 	return strings.TrimSpace(planText), nil
 }
 
-type planResponseKind int
-
-const (
-	planResponseFeedback planResponseKind = iota
-	planResponseApprove
-	planResponseCancel
-)
-
-func classifyPlanResponse(message string) planResponseKind {
-	normalized := strings.ToLower(strings.TrimSpace(message))
-	normalized = strings.Trim(normalized, " \t\r\n。.!！")
-	if normalized == "" {
-		return planResponseFeedback
+func parsePlanRoutingDecision(content string) (planRoutingDecision, error) {
+	var decision planRoutingDecision
+	if err := json.Unmarshal([]byte(extractPlanDecisionJSON(content)), &decision); err != nil {
+		return planRoutingDecision{}, err
 	}
-
-	for _, marker := range []string{"取消", "不要", "不用", "不可以", "算了", "停止", "放弃"} {
-		if normalized == marker || strings.Contains(normalized, marker) {
-			return planResponseCancel
-		}
-	}
-	if normalized == "否" {
-		return planResponseCancel
-	}
-	for _, marker := range []string{"确认", "确定", "同意", "执行", "开始", "继续", "批准", "可以", "按这个来"} {
-		if normalized == marker || strings.Contains(normalized, marker) {
-			return planResponseApprove
-		}
-	}
-	tokens := asciiWordTokens(normalized)
-	if hasAnyToken(tokens, "cancel", "no", "reject", "stop", "n") {
-		return planResponseCancel
-	}
-	if hasAnyToken(tokens, "yes", "y", "ok", "approve", "confirm") || normalized == "go" {
-		return planResponseApprove
-	}
-	return planResponseFeedback
+	return normalizePlanRoutingDecision(decision), nil
 }
 
-func messageRequestsPlan(message string) bool {
-	message = strings.TrimSpace(message)
-	if message == "" {
-		return false
+func normalizePlanRoutingDecision(decision planRoutingDecision) planRoutingDecision {
+	switch decision.Action {
+	case planRouteStart, planRouteApprove, planRouteCancel, planRouteRevise:
+	default:
+		decision.Action = planRouteIgnore
 	}
-	lower := strings.ToLower(message)
-	return hasPlanPrefix(lower) || planKeywordPattern.MatchString(lower) || strings.Contains(message, "计划")
+	decision.Task = strings.Join(strings.Fields(decision.Task), " ")
+	decision.Feedback = strings.TrimSpace(decision.Feedback)
+	decision.Reason = strings.TrimSpace(decision.Reason)
+	return decision
 }
 
-func stripPlanKeyword(message string) string {
-	cleaned := strings.TrimSpace(message)
-	if hasPlanPrefix(strings.ToLower(cleaned)) {
-		cleaned = strings.TrimSpace(cleaned[len("plan"):])
+func extractPlanDecisionJSON(content string) string {
+	content = strings.TrimSpace(content)
+	start := strings.Index(content, "{")
+	end := strings.LastIndex(content, "}")
+	if start >= 0 && end >= start {
+		return content[start : end+1]
 	}
-	cleaned = planKeywordPattern.ReplaceAllString(cleaned, " ")
-	for _, marker := range []string{"先做计划", "做个计划", "制定计划", "计划一下", "先计划", "计划"} {
-		cleaned = strings.ReplaceAll(cleaned, marker, " ")
-	}
-	cleaned = strings.Trim(cleaned, " \t\r\n:：,，.。-—")
-	cleaned = strings.Join(strings.Fields(cleaned), " ")
-	return cleaned
-}
-
-func hasPlanPrefix(message string) bool {
-	message = strings.TrimSpace(message)
-	if message == "plan" {
-		return true
-	}
-	if !strings.HasPrefix(message, "plan") {
-		return false
-	}
-	rest := strings.TrimSpace(strings.TrimPrefix(message, "plan"))
-	if rest == "" {
-		return true
-	}
-	return !isASCIIWordRune(firstRune(rest))
-}
-
-func firstRune(value string) rune {
-	for _, r := range value {
-		return r
-	}
-	return 0
-}
-
-func isASCIIWordRune(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
-}
-
-func asciiWordTokens(value string) []string {
-	fields := strings.FieldsFunc(value, func(r rune) bool {
-		return !isASCIIWordRune(r)
-	})
-	tokens := make([]string, 0, len(fields))
-	for _, field := range fields {
-		field = strings.ToLower(strings.TrimSpace(field))
-		if field != "" {
-			tokens = append(tokens, field)
-		}
-	}
-	return tokens
-}
-
-func hasAnyToken(tokens []string, candidates ...string) bool {
-	if len(tokens) == 0 {
-		return false
-	}
-	allowed := make(map[string]struct{}, len(candidates))
-	for _, candidate := range candidates {
-		allowed[candidate] = struct{}{}
-	}
-	for _, token := range tokens {
-		if _, ok := allowed[token]; ok {
-			return true
-		}
-	}
-	return false
+	return content
 }
 
 func formatPlanConfirmationReply(planText string) string {
