@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,11 +40,31 @@ Use sources under {baseDir}.
 func TestLoadSkillsAppliesOpenClawPrecedenceAndGates(t *testing.T) {
 	root := t.TempDir()
 	home := t.TempDir()
+	openClawWorkspace := filepath.Join(home, "openclaw-workspace")
+	if err := os.MkdirAll(filepath.Join(home, ".openclaw"), 0o755); err != nil {
+		t.Fatalf("mkdir openclaw: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".openclaw", "openclaw.json"), []byte(`{"agents":{"defaults":{"workspace":`+quoteJSON(openClawWorkspace)+`}}}`), 0o644); err != nil {
+		t.Fatalf("write openclaw config: %v", err)
+	}
 	writeSkillFile(t, filepath.Join(home, ".openclaw", "skills", "research", "SKILL.md"), `---
 name: research
-description: Managed copy.
+description: Legacy managed copy.
 ---
-Managed instructions.
+Legacy managed instructions.
+`)
+	writeSkillFile(t, filepath.Join(openClawWorkspace, "skills", "research", "SKILL.md"), `---
+name: research
+description: OpenClaw workspace copy.
+---
+OpenClaw workspace instructions.
+`)
+	writeSkillFile(t, filepath.Join(home, ".skillhub", "skills", "weather", "SKILL.md"), `---
+name: weather
+description: SkillHub weather.
+metadata: { "clawdbot": { "requires": { "bins": ["go"] } } }
+---
+Weather instructions.
 `)
 	writeSkillFile(t, filepath.Join(root, "skills", "group", "research", "SKILL.md"), `---
 name: research
@@ -73,18 +94,63 @@ Needs env instructions.
 	if err != nil {
 		t.Fatalf("load skills: %v", err)
 	}
+	if len(skills) != 2 {
+		t.Fatalf("skills = %d, want workspace research plus skillhub weather; %+v", len(skills), skills)
+	}
+	byName := map[string]*FileSkill{}
+	for _, loaded := range skills {
+		skill, ok := loaded.(*FileSkill)
+		if !ok {
+			t.Fatalf("skill type = %T, want *FileSkill", loaded)
+		}
+		byName[skill.Name()] = skill
+	}
+	research := byName["research"]
+	if research == nil {
+		t.Fatalf("research missing from loaded skills: %+v", skills)
+	}
+	if research.Description() != "Workspace copy." || research.Source() != "workspace" {
+		t.Fatalf("research = %+v", research)
+	}
+	if !strings.Contains(research.SkillPath(), filepath.Join(root, "skills", "group", "research", "SKILL.md")) {
+		t.Fatalf("research path = %s", research.SkillPath())
+	}
+	weather := byName["weather"]
+	if weather == nil {
+		t.Fatalf("weather missing from loaded skills: %+v", skills)
+	}
+	if weather.Description() != "SkillHub weather." || weather.Source() != "skillhub" {
+		t.Fatalf("weather = %+v", weather)
+	}
+	if !strings.Contains(weather.SkillPath(), filepath.Join(home, ".skillhub", "skills", "weather", "SKILL.md")) {
+		t.Fatalf("weather path = %s", weather.SkillPath())
+	}
+}
+
+func TestLoadSkillsUsesOpenClawWorkspaceWhenNoProjectOverride(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	openClawWorkspace := filepath.Join(home, ".openclaw", "workspace")
+	writeSkillFile(t, filepath.Join(openClawWorkspace, "skills", "baidu-search", "SKILL.md"), `---
+name: baidu-search
+description: Search with Baidu.
+---
+Baidu instructions.
+`)
+
+	skills, err := LoadSkills(SkillLoadOptions{
+		WorkspaceRoot: root,
+		HomeDir:       home,
+	})
+	if err != nil {
+		t.Fatalf("load skills: %v", err)
+	}
 	if len(skills) != 1 {
-		t.Fatalf("skills = %d, want only workspace research; %+v", len(skills), skills)
+		t.Fatalf("skills = %d, want openclaw workspace skill; %+v", len(skills), skills)
 	}
-	skill, ok := skills[0].(*FileSkill)
-	if !ok {
-		t.Fatalf("skill type = %T, want *FileSkill", skills[0])
-	}
-	if skill.Name() != "research" || skill.Description() != "Workspace copy." || skill.Source() != "workspace" {
+	skill := skills[0].(*FileSkill)
+	if skill.Name() != "baidu-search" || skill.Source() != "openclaw-workspace" {
 		t.Fatalf("skill = %+v", skill)
-	}
-	if !strings.Contains(skill.SkillPath(), filepath.Join(root, "skills", "group", "research", "SKILL.md")) {
-		t.Fatalf("skill path = %s", skill.SkillPath())
 	}
 }
 
@@ -128,4 +194,12 @@ func writeSkillFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write skill: %v", err)
 	}
+}
+
+func quoteJSON(value string) string {
+	quoted, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(quoted)
 }

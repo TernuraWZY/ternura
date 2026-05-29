@@ -26,6 +26,11 @@ type SkillRoot struct {
 	Source string
 }
 
+type SkillSource struct {
+	Name  string
+	Roots []SkillRoot
+}
+
 type SkillLoadOptions struct {
 	WorkspaceRoot string
 	HomeDir       string
@@ -54,17 +59,45 @@ func DefaultSkillRoots(workspaceRoot string) []SkillRoot {
 }
 
 func defaultSkillRootsWithHome(workspaceRoot string, homeDir string) []SkillRoot {
-	roots := []SkillRoot{
-		{Path: filepath.Join(workspaceRoot, defaultSkillRootName), Source: "workspace"},
-		{Path: filepath.Join(workspaceRoot, ".agents", defaultSkillRootName), Source: "project-agent"},
-	}
-	if strings.TrimSpace(homeDir) != "" {
-		roots = append(roots,
-			SkillRoot{Path: filepath.Join(homeDir, ".agents", defaultSkillRootName), Source: "personal-agent"},
-			SkillRoot{Path: filepath.Join(homeDir, ".openclaw", defaultSkillRootName), Source: "managed"},
-		)
+	sources := defaultSkillSourcesWithHome(workspaceRoot, homeDir)
+	roots := make([]SkillRoot, 0)
+	for _, source := range sources {
+		roots = append(roots, source.Roots...)
 	}
 	return roots
+}
+
+func defaultSkillSourcesWithHome(workspaceRoot string, homeDir string) []SkillSource {
+	sources := []SkillSource{
+		{
+			Name: "project",
+			Roots: []SkillRoot{
+				{Path: filepath.Join(workspaceRoot, defaultSkillRootName), Source: "workspace"},
+				{Path: filepath.Join(workspaceRoot, ".agents", defaultSkillRootName), Source: "project-agent"},
+			},
+		},
+	}
+	if strings.TrimSpace(homeDir) != "" {
+		sources = append(sources,
+			SkillSource{
+				Name: "personal",
+				Roots: []SkillRoot{
+					{Path: filepath.Join(homeDir, ".agents", defaultSkillRootName), Source: "personal-agent"},
+				},
+			},
+			SkillSource{
+				Name:  "openclaw",
+				Roots: openClawSkillRoots(homeDir),
+			},
+			SkillSource{
+				Name: "skillhub",
+				Roots: []SkillRoot{
+					{Path: filepath.Join(homeDir, ".skillhub", defaultSkillRootName), Source: "skillhub"},
+				},
+			},
+		)
+	}
+	return sources
 }
 
 func LoadSkills(options SkillLoadOptions) ([]Skill, error) {
@@ -83,6 +116,7 @@ func LoadSkills(options SkillLoadOptions) ([]Skill, error) {
 			roots = append(roots, SkillRoot{Path: dir, Source: "extra"})
 		}
 	}
+	roots = dedupeSkillRoots(roots)
 
 	allowlist := normalizedNameSet(options.Allowlist)
 	disabled := normalizedNameSet(options.Disabled)
@@ -106,6 +140,53 @@ func LoadSkills(options SkillLoadOptions) ([]Skill, error) {
 		}
 	}
 	return loaded, nil
+}
+
+func openClawSkillRoots(homeDir string) []SkillRoot {
+	openClawDir := filepath.Join(homeDir, ".openclaw")
+	roots := make([]SkillRoot, 0, 2)
+	for _, workspace := range openClawWorkspaces(openClawDir) {
+		roots = append(roots, SkillRoot{
+			Path:   filepath.Join(workspace, defaultSkillRootName),
+			Source: "openclaw-workspace",
+		})
+	}
+	roots = append(roots, SkillRoot{
+		Path:   filepath.Join(openClawDir, defaultSkillRootName),
+		Source: "openclaw-legacy",
+	})
+	return roots
+}
+
+func openClawWorkspaces(openClawDir string) []string {
+	openClawDir = strings.TrimSpace(openClawDir)
+	if openClawDir == "" {
+		return nil
+	}
+	workspaces := make([]string, 0, 2)
+	configPath := filepath.Join(openClawDir, "openclaw.json")
+	content, err := os.ReadFile(configPath)
+	if err == nil {
+		if workspace := parseOpenClawWorkspace(content); workspace != "" {
+			workspaces = append(workspaces, expandHome(workspace))
+		}
+	}
+	workspaces = append(workspaces, filepath.Join(openClawDir, "workspace"))
+	return dedupeStrings(workspaces)
+}
+
+func parseOpenClawWorkspace(content []byte) string {
+	var config struct {
+		Agents struct {
+			Defaults struct {
+				Workspace string `json:"workspace"`
+			} `json:"defaults"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(content, &config); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(config.Agents.Defaults.Workspace)
 }
 
 func loadSkillsFromRoot(root SkillRoot, allowlist map[string]struct{}, disabled map[string]struct{}) ([]Skill, error) {
@@ -404,6 +485,50 @@ func normalizedNameSet(values []string) map[string]struct{} {
 		}
 	}
 	return set
+}
+
+func dedupeSkillRoots(roots []SkillRoot) []SkillRoot {
+	out := make([]SkillRoot, 0, len(roots))
+	seen := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		path := strings.TrimSpace(root.Path)
+		if path == "" {
+			continue
+		}
+		key := expandHome(path)
+		if abs, err := filepath.Abs(key); err == nil {
+			key = abs
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		root.Path = path
+		root.Source = strings.TrimSpace(root.Source)
+		out = append(out, root)
+	}
+	return out
+}
+
+func dedupeStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := expandHome(value)
+		if abs, err := filepath.Abs(key); err == nil {
+			key = abs
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func expandHome(path string) string {

@@ -12,6 +12,7 @@ type memoryHook struct {
 	store            *memoryStore
 	sessionID        func() string
 	keywordExtractor activeMemoryKeywordExtractor
+	summarizer       activeMemorySummarizer
 }
 
 type memoryHookOption func(*memoryHook)
@@ -19,6 +20,12 @@ type memoryHookOption func(*memoryHook)
 func withActiveMemoryKeywordExtractor(extractor activeMemoryKeywordExtractor) memoryHookOption {
 	return func(h *memoryHook) {
 		h.keywordExtractor = extractor
+	}
+}
+
+func withActiveMemorySummarizer(summarizer activeMemorySummarizer) memoryHookOption {
+	return func(h *memoryHook) {
+		h.summarizer = summarizer
 	}
 }
 
@@ -45,7 +52,7 @@ func (h *memoryHook) BeforeModelCall(ctx context.Context, run *agent.RunContext)
 	}
 	recall, ok := cachedActiveMemoryRecall(run)
 	if ok {
-		run.SetContextBlockWithPriority("active-memory", "Active Memory", recall.ContextBlock(), agent.RuntimeContextPriorityNormal, 4000)
+		run.SetContextBlockWithPriority("active-memory", "Active Memory", recall.ContextBlock(), agent.RuntimeContextPriorityNormal, 1000)
 		return nil
 	}
 
@@ -55,15 +62,18 @@ func (h *memoryHook) BeforeModelCall(ctx context.Context, run *agent.RunContext)
 		log.Printf("build active memory query: %v", err)
 		return nil
 	}
-	h.applyAIKeywordQuery(ctx, &recallQuery)
+	if recallQuery.ShouldRecall {
+		h.applyAIKeywordQuery(ctx, &recallQuery)
+	}
 
 	recall, err = h.store.ActiveRecall(sessionID, recallQuery)
 	if err != nil {
 		log.Printf("active memory recall: %v", err)
 		return nil
 	}
+	h.applyAISummary(ctx, run, &recall)
 	cacheActiveMemoryRecall(run, recall)
-	run.SetContextBlockWithPriority("active-memory", "Active Memory", recall.ContextBlock(), agent.RuntimeContextPriorityNormal, 4000)
+	run.SetContextBlockWithPriority("active-memory", "Active Memory", recall.ContextBlock(), agent.RuntimeContextPriorityNormal, 1000)
 	return nil
 }
 
@@ -124,15 +134,52 @@ func (h *memoryHook) applyAIKeywordQuery(ctx context.Context, recallQuery *activ
 	recallQuery.Keywords = normalizeKeywordList(result.Keywords, 8)
 	recallQuery.QueryMode = "ai_" + normalizeActiveMemoryQueryMode(result.QueryMode)
 	if !result.ShouldRecall {
+		recallQuery.ShouldRecall = false
+		recallQuery.Keywords = nil
 		recallQuery.SearchQuery = ""
 		return
 	}
 
+	recallQuery.ShouldRecall = true
 	searchQuery := strings.Join(strings.Fields(result.SearchQuery), " ")
 	if searchQuery == "" && len(recallQuery.Keywords) > 0 {
 		searchQuery = strings.Join(recallQuery.Keywords, " ")
 	}
 	recallQuery.SearchQuery = truncateRunes(searchQuery, h.store.activeMemoryMaxQueryRunes)
+}
+
+func (h *memoryHook) applyAISummary(ctx context.Context, run *agent.RunContext, recall *activeMemoryRecall) {
+	if h == nil || h.summarizer == nil || h.store == nil || run == nil || recall == nil {
+		return
+	}
+	candidate := strings.TrimSpace(recall.RawSummary)
+	if candidate == "" {
+		candidate = strings.TrimSpace(recall.Summary)
+	}
+	if candidate == "" {
+		return
+	}
+	result, err := h.summarizer.SummarizeActiveMemory(ctx, activeMemorySummaryInput{
+		LatestQuery:     run.Query,
+		QueryMode:       recall.QueryMode,
+		SearchQuery:     recall.SearchQuery,
+		Keywords:        recall.Keywords,
+		RecallCandidate: candidate,
+		MaxSummaryRunes: h.store.activeMemoryMaxSummaryRunes,
+	})
+	if err != nil {
+		log.Printf("active memory summarization: %v", err)
+		return
+	}
+	summary := strings.TrimSpace(result.Summary)
+	if summary == "" {
+		recall.Summary = ""
+		recall.Summarized = true
+		recall.Status = "no_relevant_memory"
+		return
+	}
+	recall.Summary = truncateRunes(summary, h.store.activeMemoryMaxSummaryRunes)
+	recall.Summarized = true
 }
 
 func formatActiveMemoryTrace(recall activeMemoryRecall) string {
@@ -148,6 +195,9 @@ func formatActiveMemoryTrace(recall activeMemoryRecall) string {
 	}
 	if recall.QueryMode != "" {
 		sections = append(sections, "**Query mode**", "", "`"+recall.QueryMode+"`", "")
+	}
+	if recall.Summarized {
+		sections = append(sections, "**Summary mode**", "", "`ai_summary`", "")
 	}
 	if len(recall.Keywords) > 0 {
 		sections = append(sections, "**Keywords**", "", "`"+strings.Join(recall.Keywords, "`, `")+"`", "")

@@ -77,6 +77,56 @@ func TestRunWithTraceUsesEinoReactToolLoop(t *testing.T) {
 	}
 }
 
+func TestRunWithTraceRetriesWhenFinalizeRequiresTool(t *testing.T) {
+	fakeTool := &fakeAgentTool{
+		name:   tool.AgentTool("fake_tool"),
+		result: "grounded output",
+	}
+	model := &scriptedChatModel{}
+	model.generate = func(call int, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
+		switch call {
+		case 1:
+			return schema.AssistantMessage("I ran fake_tool and got a result.", nil), nil
+		case 2:
+			if !containsSystemContent(input, "must call the fake_tool tool") {
+				t.Fatalf("retry input missing required tool policy: %+v", input)
+			}
+			return schema.AssistantMessage("", []schema.ToolCall{{
+				ID: "call-retry",
+				Function: schema.FunctionCall{
+					Name:      string(fakeTool.name),
+					Arguments: `{"value":"retry"}`,
+				},
+			}}), nil
+		case 3:
+			if !containsToolMessage(input, "call-retry", "grounded output") {
+				t.Fatalf("final input missing tool result: %+v", input)
+			}
+			return schema.AssistantMessage("Grounded answer.", nil), nil
+		default:
+			t.Fatalf("unexpected generate call %d", call)
+			return nil, nil
+		}
+	}
+
+	agent := NewAgent(testModelConfig(), "system", []tool.Tool{fakeTool}, WithHooks(finalizeRetryHook{toolName: fakeTool.name}))
+	agent.chatModel = model
+
+	result, err := agent.RunWithTrace(context.Background(), "use the fake tool")
+	if err != nil {
+		t.Fatalf("run with trace: %v", err)
+	}
+	if result.Content != "Grounded answer." {
+		t.Fatalf("content = %q, want grounded answer", result.Content)
+	}
+	if model.generateCalls != 3 {
+		t.Fatalf("generate calls = %d, want 3", model.generateCalls)
+	}
+	if len(fakeTool.calls) != 1 {
+		t.Fatalf("tool calls = %+v, want one retry call", fakeTool.calls)
+	}
+}
+
 func TestRunStreamingUsesEinoReactToolLoop(t *testing.T) {
 	fakeTool := &fakeAgentTool{
 		name:   tool.AgentTool("fake_stream_tool"),
@@ -212,6 +262,28 @@ func (h *runtimeContextHook) BeforeModelCall(_ context.Context, run *RunContext)
 		content = "second model call"
 	}
 	run.SetContextBlock("test-runtime", "Test Runtime", content)
+	return nil
+}
+
+type finalizeRetryHook struct {
+	toolName tool.AgentTool
+	retried  bool
+}
+
+func (h finalizeRetryHook) HookName() string {
+	return "finalize_retry_test"
+}
+
+func (h finalizeRetryHook) FinalizeRun(_ context.Context, run *RunContext, result *AgentRunResult) error {
+	if run.ToolCallCount > 0 {
+		return nil
+	}
+	run.SetToolPolicy(RequireTool(h.toolName))
+	result.Trace = append(result.Trace, AgentTraceItem{
+		Type:    "guard",
+		Title:   "test retry",
+		Content: "retry",
+	})
 	return nil
 }
 

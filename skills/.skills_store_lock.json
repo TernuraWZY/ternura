@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "skills": {
+    "web-search": {
+      "name": "Web Search",
+      "zip_url": "https://api.skillhub.cn/api/v1/download?slug=web-search",
+      "source": "community",
+      "version": "1.0.0",
+      "installedAt": "2026-05-29T16:49:37Z"
+    },
+    "web-content-fetcher": {
+      "name": "Web Content Fetcher",
+      "zip_url": "https://api.skillhub.cn/api/v1/download?slug=web-content-fetcher",
+      "source": "community",
+      "version": "1.0.1",
+      "installedAt": "2026-05-29T16:49:43Z"
+    },
+    "web-tools-guide": {
+      "name": "web-tools-guide",
+      "zip_url": "https://api.skillhub.cn/api/v1/download?slug=web-tools-guide",
+      "source": "community",
+      "version": "1.0.2",
+      "installedAt": "2026-05-29T16:49:45Z"
+    }
+  }
+}

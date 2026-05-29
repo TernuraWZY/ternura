@@ -225,6 +225,10 @@ func (s *sessionStore) FinishRunForSession(sessionID string, run runLifecycle, u
 	return s.finishRunLocked(sessionID, run, userMessage, userMessage, runTriggerKindUser, result, status, finishedAt, runErr)
 }
 
+func (s *sessionStore) FinishRunForSessionWithoutMessages(sessionID string, run runLifecycle, userMessage string, result agent.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
+	return s.finishRunLocked(sessionID, run, userMessage, "", runTriggerKindUser, result, status, finishedAt, runErr)
+}
+
 // FinishScheduledRunForSession 把定时触发的 run 写回 session：
 //   - displayPrompt 写入 run.UserMessage，让外部端展示自然语言的提醒文本；
 //   - runtimePrompt 才是真正塞进 LLM messages 历史的 user 内容（一般是带 "[cron job fired]" 前缀的包装版本），
@@ -263,7 +267,7 @@ func (s *sessionStore) finishRunLocked(sessionID string, run runLifecycle, displ
 	}
 
 	upsertRun(session, item)
-	if status == runStatusSucceeded && result.Content != "" {
+	if status == runStatusSucceeded && result.Content != "" && strings.TrimSpace(runtimeMessage) != "" {
 		session.Messages = append(session.Messages,
 			persistedMessage{Role: "user", Content: runtimeMessage},
 			persistedMessage{Role: "assistant", Content: result.Content},
@@ -320,6 +324,42 @@ func (s *sessionStore) NewSession() (sessionSnapshot, error) {
 		s.snapshot.Sessions = append(s.snapshot.Sessions, session)
 	}
 	s.snapshot.CurrentSessionID = session.SessionID
+	if err := s.saveLocked(); err != nil {
+		return sessionSnapshot{}, err
+	}
+	return cloneSnapshot(s.snapshot), nil
+}
+
+func (s *sessionStore) ResetSession(sessionID string, title string) (sessionSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return sessionSnapshot{}, fmt.Errorf("session id is required")
+	}
+
+	now := time.Now()
+	timestamp := now.Format(time.RFC3339Nano)
+	session := persistedSession{
+		SessionID: sessionID,
+		Title:     sessionTitle(firstNonEmpty(title, "New session")),
+		CreatedAt: timestamp,
+		UpdatedAt: timestamp,
+		Runs:      make([]persistedRun, 0),
+		Messages:  make([]persistedMessage, 0),
+		Todos:     make([]persistedTodo, 0),
+	}
+
+	if existing := s.findSessionLocked(sessionID); existing != nil {
+		*existing = session
+	} else {
+		s.snapshot.Sessions = append(s.snapshot.Sessions, session)
+	}
+	s.snapshot.CurrentSessionID = sessionID
+	if err := os.RemoveAll(s.sessionPath(sessionID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return sessionSnapshot{}, err
+	}
 	if err := s.saveLocked(); err != nil {
 		return sessionSnapshot{}, err
 	}

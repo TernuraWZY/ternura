@@ -28,7 +28,10 @@ const (
 	defaultToolMemoryLimit             = 80
 	defaultToolContextLimit            = 5
 	defaultActiveMemoryRecentTurnLimit = 3
-	defaultActiveMemoryMaxSummaryRunes = 1800
+	defaultActiveMemoryLongTermLimit   = 4
+	defaultActiveMemoryShortTermLimit  = 2
+	defaultActiveMemoryToolLimit       = 2
+	defaultActiveMemoryMaxSummaryRunes = 300
 	defaultActiveMemoryMaxQueryRunes   = 800
 	maxMemoryContentRunes              = 500
 	maxShortTermFieldRunes             = 700
@@ -47,6 +50,9 @@ type memoryStore struct {
 	toolMemoryLimit             int
 	toolContextLimit            int
 	activeMemoryRecentTurnLimit int
+	activeMemoryLongTermLimit   int
+	activeMemoryShortTermLimit  int
+	activeMemoryToolLimit       int
 	activeMemoryMaxSummaryRunes int
 	activeMemoryMaxQueryRunes   int
 }
@@ -119,6 +125,9 @@ func newMemoryStore(root string) *memoryStore {
 		toolMemoryLimit:             defaultToolMemoryLimit,
 		toolContextLimit:            defaultToolContextLimit,
 		activeMemoryRecentTurnLimit: defaultActiveMemoryRecentTurnLimit,
+		activeMemoryLongTermLimit:   defaultActiveMemoryLongTermLimit,
+		activeMemoryShortTermLimit:  defaultActiveMemoryShortTermLimit,
+		activeMemoryToolLimit:       defaultActiveMemoryToolLimit,
 		activeMemoryMaxSummaryRunes: defaultActiveMemoryMaxSummaryRunes,
 		activeMemoryMaxQueryRunes:   defaultActiveMemoryMaxQueryRunes,
 	}
@@ -282,21 +291,26 @@ func (m *memoryStore) RuntimeContextForQuery(sessionID string, query string) (st
 }
 
 type activeMemoryRecall struct {
-	Status      string
-	QueryMode   string
-	Query       string
-	SearchQuery string
-	Keywords    []string
-	Summary     string
+	Status       string
+	Skipped      bool
+	ShouldRecall bool
+	Summarized   bool
+	QueryMode    string
+	Query        string
+	SearchQuery  string
+	Keywords     []string
+	Summary      string
+	RawSummary   string
 }
 
 type activeMemoryRecallQuery struct {
-	LatestQuery string
-	QueryMode   string
-	Query       string
-	SearchQuery string
-	Keywords    []string
-	RecentTurns []shortTermTurn
+	LatestQuery  string
+	ShouldRecall bool
+	QueryMode    string
+	Query        string
+	SearchQuery  string
+	Keywords     []string
+	RecentTurns  []shortTermTurn
 }
 
 func (r activeMemoryRecall) ContextBlock() string {
@@ -336,11 +350,12 @@ func (m *memoryStore) ActiveRecallQueryForQuery(sessionID string, query string) 
 	searchQuery := buildActiveMemorySearchQuery(query, searchTurns, m.activeMemoryMaxQueryRunes)
 
 	return activeMemoryRecallQuery{
-		LatestQuery: strings.TrimSpace(query),
-		QueryMode:   "recent",
-		Query:       recallQuery,
-		SearchQuery: searchQuery,
-		RecentTurns: append([]shortTermTurn(nil), recentTurns...),
+		LatestQuery:  strings.TrimSpace(query),
+		ShouldRecall: shouldAttemptActiveMemoryRecall(query, searchQuery),
+		QueryMode:    "recent",
+		Query:        recallQuery,
+		SearchQuery:  searchQuery,
+		RecentTurns:  append([]shortTermTurn(nil), recentTurns...),
 	}, nil
 }
 
@@ -375,29 +390,43 @@ func (m *memoryStore) ActiveRecall(sessionID string, recallQuery activeMemoryRec
 	}
 	recallQuery.SearchQuery = truncateRunes(strings.TrimSpace(recallQuery.SearchQuery), m.activeMemoryMaxQueryRunes)
 	recallQuery.Keywords = normalizeKeywordList(recallQuery.Keywords, 8)
+	if !recallQuery.ShouldRecall {
+		return activeMemoryRecall{
+			Status:       "skipped",
+			Skipped:      true,
+			QueryMode:    recallQuery.QueryMode,
+			Query:        recallQuery.Query,
+			SearchQuery:  "",
+			Keywords:     nil,
+			ShouldRecall: false,
+		}, nil
+	}
 
-	longTermMemories := selectLongTermMemoriesForActiveRecall(longTerm.Memories, recallQuery.SearchQuery, m.longTermContextLimit)
-	shortTermTurns := selectShortTermTurnsForActiveRecall(shortTerm.Turns, recallQuery.LatestQuery, recallQuery.SearchQuery, m.shortTermContextLimit)
-	toolMemories := selectToolMemoriesForContext(shortTerm.ToolMemories, recallQuery.SearchQuery, m.toolContextLimit)
+	longTermMemories := selectLongTermMemoriesForActiveRecall(longTerm.Memories, recallQuery.SearchQuery, m.activeMemoryLongTermLimit)
+	shortTermTurns := selectShortTermTurnsForActiveRecall(shortTerm.Turns, recallQuery.LatestQuery, recallQuery.SearchQuery, m.activeMemoryShortTermLimit)
+	toolMemories := selectToolMemoriesForContext(shortTerm.ToolMemories, recallQuery.SearchQuery, m.activeMemoryToolLimit)
 
 	summary := renderActiveMemorySummary(longTermMemories, shortTermTurns, toolMemories)
 	if summary == "" {
 		return activeMemoryRecall{
-			Status:      "no_relevant_memory",
-			QueryMode:   recallQuery.QueryMode,
-			Query:       recallQuery.Query,
-			SearchQuery: recallQuery.SearchQuery,
-			Keywords:    recallQuery.Keywords,
+			Status:       "no_relevant_memory",
+			ShouldRecall: true,
+			QueryMode:    recallQuery.QueryMode,
+			Query:        recallQuery.Query,
+			SearchQuery:  recallQuery.SearchQuery,
+			Keywords:     recallQuery.Keywords,
 		}, nil
 	}
 
 	return activeMemoryRecall{
-		Status:      "ok",
-		QueryMode:   recallQuery.QueryMode,
-		Query:       recallQuery.Query,
-		SearchQuery: recallQuery.SearchQuery,
-		Keywords:    recallQuery.Keywords,
-		Summary:     truncateRunes(summary, m.activeMemoryMaxSummaryRunes),
+		Status:       "ok",
+		ShouldRecall: true,
+		QueryMode:    recallQuery.QueryMode,
+		Query:        recallQuery.Query,
+		SearchQuery:  recallQuery.SearchQuery,
+		Keywords:     recallQuery.Keywords,
+		Summary:      truncateRunes(summary, m.activeMemoryMaxSummaryRunes),
+		RawSummary:   summary,
 	}, nil
 }
 
@@ -483,6 +512,24 @@ func (m *memoryStore) AppendToolMemories(sessionID string, records []toolMemoryR
 	file.ToolMemories = append(file.ToolMemories, records...)
 	trimToolMemories(&file, m.toolMemoryLimit)
 	return m.saveShortTermLocked(sessionID, file)
+}
+
+func (m *memoryStore) ResetSession(sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := os.Remove(m.shortTermPath(sessionID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.RemoveAll(m.toolArtifactsPath(sessionID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (m *memoryStore) Status(sessionID string) (memoryStatusResponse, error) {
@@ -1065,6 +1112,34 @@ func normalizeKeywordList(keywords []string, limit int) []string {
 
 func looksLikeToolMemoryReference(query string) bool {
 	return looksLikeContextReference(query)
+}
+
+func shouldAttemptActiveMemoryRecall(query string, searchQuery string) bool {
+	query = strings.TrimSpace(query)
+	if query == "" || looksLikeLowSignalMemoryQuery(query) {
+		return false
+	}
+	if looksLikeContextReference(query) {
+		return true
+	}
+	return len(keywordTokens(searchQuery)) > 0
+}
+
+func looksLikeLowSignalMemoryQuery(query string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(query)), " "))
+	normalized = strings.Trim(normalized, "。！？!?.,， ")
+	if normalized == "" {
+		return true
+	}
+	switch normalized {
+	case "你好", "您好", "嗨", "哈喽", "hello", "hi", "hey",
+		"谢谢", "感谢", "好的", "好", "嗯", "嗯嗯", "行", "可以", "ok", "okay", "thanks", "thank you":
+		return true
+	}
+	if len([]rune(normalized)) <= 2 {
+		return true
+	}
+	return false
 }
 
 func looksLikeContextReference(query string) bool {

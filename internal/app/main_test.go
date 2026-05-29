@@ -110,6 +110,69 @@ func TestSessionStoreNewSessionPreservesPreviousSession(t *testing.T) {
 	}
 }
 
+func TestSessionStoreResetSessionClearsExistingSession(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.json")
+	store := newSessionStore(path)
+	sessionID := "feishu-test"
+	if _, err := store.EnsureSession(sessionID, "Feishu Test"); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	run := runLifecycle{ID: "run-reset-test", StartedAt: time.Now()}
+	if err := store.StartRunForSession(sessionID, run, "hello"); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if err := store.FinishRunForSession(sessionID, run, "hello", agent.AgentRunResult{Content: "hi"}, runStatusSucceeded, time.Now(), nil); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sessionsDirName, sessionID, sessionRunsDirName, run.ID+sessionRunFileExtension)); err != nil {
+		t.Fatalf("run file not written before reset: %v", err)
+	}
+
+	snapshot, err := store.ResetSession(sessionID, "Feishu Test")
+	if err != nil {
+		t.Fatalf("reset session: %v", err)
+	}
+	session := findSession(snapshot.Sessions, sessionID)
+	if session == nil {
+		t.Fatalf("reset session missing from snapshot: %+v", snapshot.Sessions)
+	}
+	if len(session.Runs) != 0 || len(session.Messages) != 0 || len(session.Todos) != 0 {
+		t.Fatalf("session should be empty after reset: %+v", session)
+	}
+	if _, err := os.Stat(filepath.Join(dir, sessionsDirName, sessionID, sessionRunsDirName, run.ID+sessionRunFileExtension)); !os.IsNotExist(err) {
+		t.Fatalf("old run file should be removed, err=%v", err)
+	}
+
+	resetRun := runLifecycle{ID: "run-reset-confirm", StartedAt: time.Now()}
+	if err := store.StartRunForSession(sessionID, resetRun, "new session"); err != nil {
+		t.Fatalf("start reset run: %v", err)
+	}
+	if err := store.FinishRunForSessionWithoutMessages(sessionID, resetRun, "new session", agent.AgentRunResult{Content: "new session started"}, runStatusSucceeded, time.Now(), nil); err != nil {
+		t.Fatalf("finish reset run: %v", err)
+	}
+	snapshot = store.Snapshot()
+	session = findSession(snapshot.Sessions, sessionID)
+	if session == nil || len(session.Runs) != 1 {
+		t.Fatalf("reset confirmation run should be recorded only as a run: %+v", session)
+	}
+	if len(session.Messages) != 0 {
+		t.Fatalf("reset confirmation should not enter model messages: %+v", session.Messages)
+	}
+}
+
+func TestMessageRequestsNewSession(t *testing.T) {
+	cases := []string{"new session", "New   Chat!", "reset session", "新会话。", "重新开始"}
+	for _, input := range cases {
+		if !messageRequestsNewSession(input) {
+			t.Fatalf("messageRequestsNewSession(%q) = false, want true", input)
+		}
+	}
+	if messageRequestsNewSession("继续搞一下") {
+		t.Fatal("non-reset message should not request new session")
+	}
+}
+
 func TestSessionStorePersistsSessionTodos(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.json")
 	store := newSessionStore(path)

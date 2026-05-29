@@ -184,6 +184,9 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 		if err := a.hooks.FinalizeRun(ctx, runCtx, &result); err != nil {
 			return result, err
 		}
+		if a.retryFinalizationToolPolicy(ctx, runCtx) {
+			continue
+		}
 		break
 	}
 	return result, nil
@@ -227,6 +230,11 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 		result.Content = strings.TrimSpace(result.Content)
 		if err := a.hooks.FinalizeRun(ctx, runCtx, &result); err != nil {
 			return result, err
+		}
+		if a.retryFinalizationToolPolicy(ctx, runCtx) {
+			result.Content = ""
+			result.RawContent = ""
+			continue
 		}
 		if err := emit(AgentStreamEvent{
 			Type:       "done",
@@ -573,6 +581,7 @@ func lastCompleteUTF8Boundary(content string, limit int) int {
 }
 
 const ignoredToolPolicyRetryKey = "ignored_tool_policy_retry"
+const finalizationToolPolicyRetryKey = "finalization_tool_policy_retry"
 
 // retryIgnoredToolPolicy 在模型无视 Required 工具策略直接文本回复时，追加一次 nudge 并重试。
 func (a *Agent) retryIgnoredToolPolicy(_ context.Context, runCtx *RunContext, policy ToolPolicy) bool {
@@ -591,6 +600,32 @@ func (a *Agent) retryIgnoredToolPolicy(_ context.Context, runCtx *RunContext, po
 	runCtx.SetToolPolicy(policy)
 	a.messages = append(a.messages, schema.UserMessage(
 		"You must call the required tool before claiming the action succeeded. Call it now with valid arguments.",
+	))
+	return true
+}
+
+// retryFinalizationToolPolicy lets a FinalizeRun hook recover from an ungrounded
+// final answer by setting a required tool policy and asking ReAct to continue.
+func (a *Agent) retryFinalizationToolPolicy(_ context.Context, runCtx *RunContext) bool {
+	if runCtx == nil {
+		return false
+	}
+	policy := runCtx.RequestedToolPolicy()
+	if !policy.Required {
+		return false
+	}
+	if runCtx.Metadata != nil {
+		if retried, ok := runCtx.Metadata[finalizationToolPolicyRetryKey].(bool); ok && retried {
+			return false
+		}
+	}
+	if runCtx.Metadata == nil {
+		runCtx.Metadata = make(map[string]any)
+	}
+	runCtx.Metadata[finalizationToolPolicyRetryKey] = true
+	runCtx.SetToolPolicy(policy)
+	a.messages = append(a.messages, schema.UserMessage(
+		"Your previous final answer claimed a real tool result without grounded evidence. Do not write a command block as text. Call the required tool now with valid arguments, then answer from the actual tool result.",
 	))
 	return true
 }

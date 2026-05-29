@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -243,6 +244,61 @@ func TestMemoryStoreActiveRecallDoesNotUseRecentTurnsForNewTopic(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreActiveRecallSkipsLowSignalQuery(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	if _, err := store.Remember(context.Background(), tool.MemoryItem{
+		Category: tool.MemoryCategoryPreference,
+		Content:  "User likes short replies.",
+	}); err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+
+	recall, err := store.ActiveRecallForQuery("session-test", "你好")
+	if err != nil {
+		t.Fatalf("active recall: %v", err)
+	}
+
+	if recall.Status != "skipped" || !recall.Skipped {
+		t.Fatalf("recall = %+v, want skipped", recall)
+	}
+	if recall.ContextBlock() != "" {
+		t.Fatalf("skipped recall should not inject context:\n%s", recall.ContextBlock())
+	}
+}
+
+func TestMemoryStoreActiveRecallUsesTightLimits(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	for idx := 1; idx <= 6; idx++ {
+		if _, err := store.Remember(context.Background(), tool.MemoryItem{
+			Category: tool.MemoryCategoryProject,
+			Content:  fmt.Sprintf("Redis cache memory fact %d.", idx),
+		}); err != nil {
+			t.Fatalf("remember %d: %v", idx, err)
+		}
+	}
+	for idx := 1; idx <= 4; idx++ {
+		if err := store.AppendShortTermTurn("session-test", fmt.Sprintf("redis cache turn %d", idx), agent.AgentRunResult{Content: "ok"}); err != nil {
+			t.Fatalf("append short-term turn %d: %v", idx, err)
+		}
+	}
+
+	recall, err := store.ActiveRecallForQuery("session-test", "现在呢")
+	if err != nil {
+		t.Fatalf("active recall: %v", err)
+	}
+
+	maxSummaryWithTruncationSuffix := defaultActiveMemoryMaxSummaryRunes + len([]rune("..."))
+	if len([]rune(recall.Summary)) > maxSummaryWithTruncationSuffix {
+		t.Fatalf("summary length = %d, want <= %d:\n%s", len([]rune(recall.Summary)), maxSummaryWithTruncationSuffix, recall.Summary)
+	}
+	if got := strings.Count(recall.Summary, "Redis cache memory fact"); got < 3 {
+		t.Fatalf("long-term recall count = %d, want at least 3 under tight budget:\n%s", got, recall.Summary)
+	}
+	if !strings.Contains(recall.Summary, "...") {
+		t.Fatalf("summary should show truncation under tight budget:\n%s", recall.Summary)
+	}
+}
+
 func TestMemoryHookInjectsActiveMemoryBlock(t *testing.T) {
 	store := newMemoryStore(t.TempDir())
 	if _, err := store.Remember(context.Background(), tool.MemoryItem{
@@ -301,6 +357,58 @@ func TestMemoryHookUsesAIKeywordExtractorForRecall(t *testing.T) {
 	}
 	if extractor.calls != 1 {
 		t.Fatalf("keyword extractor calls = %d, want 1", extractor.calls)
+	}
+}
+
+func TestMemoryHookSummarizesRecallBeforeInjection(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	if _, err := store.Remember(context.Background(), tool.MemoryItem{
+		Category: tool.MemoryCategoryProfile,
+		Content:  "用户是一名程序员",
+	}); err != nil {
+		t.Fatalf("remember profile: %v", err)
+	}
+	if _, err := store.Remember(context.Background(), tool.MemoryItem{
+		Category: tool.MemoryCategoryProject,
+		Content:  "SkillHub command is not available on PATH.",
+	}); err != nil {
+		t.Fatalf("remember project: %v", err)
+	}
+	extractor := &fakeActiveMemoryKeywordExtractor{
+		result: activeMemoryKeywordResult{
+			ShouldRecall: true,
+			QueryMode:    "recent",
+			Keywords:     []string{"skillhub", "verification"},
+			SearchQuery:  "skillhub verification",
+		},
+	}
+	summarizer := &fakeActiveMemorySummarizer{
+		result: activeMemorySummaryResult{Summary: "SkillHub 当前不在 PATH 中；需要用真实 bash 结果确认。"},
+	}
+	hook := newMemoryHook(
+		store,
+		func() string { return "session-test" },
+		withActiveMemoryKeywordExtractor(extractor),
+		withActiveMemorySummarizer(summarizer),
+	)
+	run := agent.NewRunContext("你帮我看看现在 skill Hub 安装成功了吗", agent.RunModeSync)
+
+	if err := hook.BeforeModelCall(context.Background(), run); err != nil {
+		t.Fatalf("before model call: %v", err)
+	}
+
+	rendered := run.RuntimeContextText()
+	if !strings.Contains(rendered, "SkillHub 当前不在 PATH") {
+		t.Fatalf("summarized memory missing:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "用户是一名程序员") {
+		t.Fatalf("raw noisy memory should not be injected:\n%s", rendered)
+	}
+	if summarizer.calls != 1 {
+		t.Fatalf("summarizer calls = %d, want 1", summarizer.calls)
+	}
+	if !strings.Contains(summarizer.lastInput.RecallCandidate, "SkillHub command is not available") {
+		t.Fatalf("summarizer candidate missing raw recall: %+v", summarizer.lastInput)
 	}
 }
 
@@ -367,6 +475,9 @@ func TestMemoryHookSkipsTraceWhenRecallIsNotUseful(t *testing.T) {
 	if len(result.Trace) != 0 {
 		t.Fatalf("trace length = %d, want 0: %+v", len(result.Trace), result.Trace)
 	}
+	if extractor.calls != 0 {
+		t.Fatalf("keyword extractor should be skipped for low-signal query, calls = %d", extractor.calls)
+	}
 }
 
 func TestMemoryStoreCapturesToolMemoryAndRecallsByQuery(t *testing.T) {
@@ -422,6 +533,48 @@ func TestMemoryStoreCapturesToolMemoryAndRecallsByQuery(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreResetSessionClearsShortTermAndToolArtifacts(t *testing.T) {
+	root := t.TempDir()
+	store := newMemoryStore(root)
+	sessionID := "session-test"
+	result := agent.ToolResult{
+		Call: schema.ToolCall{
+			ID: "call-read",
+			Function: schema.FunctionCall{
+				Name:      string(tool.AgentToolRead),
+				Arguments: `{"path":"README.md"}`,
+			},
+		},
+		Content: "remembered tool output",
+	}
+	record, ok, err := store.CaptureToolMemory(context.Background(), sessionID, result)
+	if err != nil {
+		t.Fatalf("capture tool memory: %v", err)
+	}
+	if !ok {
+		t.Fatal("tool memory should be captured")
+	}
+	if err := store.AppendToolMemories(sessionID, []toolMemoryRecord{record}); err != nil {
+		t.Fatalf("append tool memory: %v", err)
+	}
+	if err := store.AppendShortTermTurn(sessionID, "hello", agent.AgentRunResult{Content: "hi"}); err != nil {
+		t.Fatalf("append short-term turn: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(record.RawRef))); err != nil {
+		t.Fatalf("tool artifact missing before reset: %v", err)
+	}
+
+	if err := store.ResetSession(sessionID); err != nil {
+		t.Fatalf("reset memory session: %v", err)
+	}
+	if _, err := os.Stat(store.shortTermPath(sessionID)); !os.IsNotExist(err) {
+		t.Fatalf("short-term memory should be removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(record.RawRef))); !os.IsNotExist(err) {
+		t.Fatalf("tool artifact should be removed, err=%v", err)
+	}
+}
+
 func TestToolMemoryHookDefersSummaryUntilRunFinishes(t *testing.T) {
 	store := newMemoryStore(t.TempDir())
 	hook := newToolMemoryHook(store, func() string { return "session-test" })
@@ -468,5 +621,18 @@ type fakeActiveMemoryKeywordExtractor struct {
 
 func (f *fakeActiveMemoryKeywordExtractor) ExtractActiveMemoryKeywords(ctx context.Context, input activeMemoryKeywordInput) (activeMemoryKeywordResult, error) {
 	f.calls++
+	return f.result, f.err
+}
+
+type fakeActiveMemorySummarizer struct {
+	result    activeMemorySummaryResult
+	err       error
+	calls     int
+	lastInput activeMemorySummaryInput
+}
+
+func (f *fakeActiveMemorySummarizer) SummarizeActiveMemory(ctx context.Context, input activeMemorySummaryInput) (activeMemorySummaryResult, error) {
+	f.calls++
+	f.lastInput = input
 	return f.result, f.err
 }

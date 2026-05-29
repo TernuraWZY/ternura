@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"ternura/agent"
@@ -17,6 +18,10 @@ func (s *agentServer) handleFeishuMessage(ctx context.Context, msg feishu.Inboun
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if messageRequestsNewSession(msg.Content) {
+		return s.resetFeishuSession(ctx, sessionID, msg)
+	}
 
 	if _, err := s.store.EnsureSession(sessionID, feishu.SessionTitle(msg)); err != nil {
 		return feishu.Reply{}, err
@@ -42,6 +47,40 @@ func (s *agentServer) handleFeishuMessage(ctx context.Context, msg feishu.Inboun
 	return s.finishFeishuRun(sessionID, run, msg.Content, result, err)
 }
 
+func (s *agentServer) resetFeishuSession(_ context.Context, sessionID string, msg feishu.InboundMessage) (feishu.Reply, error) {
+	if _, err := s.store.ResetSession(sessionID, feishu.SessionTitle(msg)); err != nil {
+		return feishu.Reply{}, err
+	}
+	if s.memory != nil {
+		if err := s.memory.ResetSession(sessionID); err != nil {
+			return feishu.Reply{}, err
+		}
+	}
+	s.resetAgentFromSnapshot(s.store.Snapshot())
+
+	run := newRunLifecycle()
+	logRunStart(run)
+	if err := s.store.StartRunForSession(sessionID, run, msg.Content); err != nil {
+		log.Printf("persist feishu reset run start %s: %v", run.ID, err)
+	}
+	result := agent.AgentRunResult{
+		Content: "新会话已开始。这个飞书会话的历史消息、短期记忆、工具记忆和待办都已清空。",
+	}
+	return s.finishFeishuResetRun(sessionID, run, msg.Content, result)
+}
+
+func messageRequestsNewSession(content string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(content)), " "))
+	normalized = strings.Trim(normalized, "。！？!?.,， ")
+	switch normalized {
+	case "new session", "new chat", "reset session", "reset chat",
+		"新会话", "开启新会话", "开始新会话", "新对话", "开启新对话", "重新开始", "清空会话":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *agentServer) finishFeishuRun(sessionID string, run runLifecycle, message string, result agent.AgentRunResult, runErr error) (feishu.Reply, error) {
 	finished := time.Now()
 	status := runStatusSucceeded
@@ -54,6 +93,15 @@ func (s *agentServer) finishFeishuRun(sessionID string, run runLifecycle, messag
 	}
 	if runErr != nil {
 		return formatFeishuAgentReply(result), runErr
+	}
+	return formatFeishuAgentReply(result), nil
+}
+
+func (s *agentServer) finishFeishuResetRun(sessionID string, run runLifecycle, message string, result agent.AgentRunResult) (feishu.Reply, error) {
+	finished := time.Now()
+	logRunFinish(run, runStatusSucceeded, finished)
+	if err := s.store.FinishRunForSessionWithoutMessages(sessionID, run, message, result, runStatusSucceeded, finished, nil); err != nil {
+		log.Printf("persist feishu reset run %s: %v", run.ID, err)
 	}
 	return formatFeishuAgentReply(result), nil
 }

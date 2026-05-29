@@ -33,7 +33,8 @@ Rules:
 - Do not include filler words, greetings, or instructions.
 - Use at most 8 keywords.
 - Keep search_query short and concrete.
-- Set should_recall=false only for pure greetings, thanks, or messages with no useful memory-recall target.`
+- Set should_recall=false for pure greetings, thanks, short acknowledgements, or standalone new-topic questions where prior memory is unlikely to help.
+- Prefer should_recall=false for current external facts such as weather, stock prices, news, exchange rates, or install status unless the user explicitly refers to previous context or stored preferences.`
 
 type activeMemoryKeywordExtractor interface {
 	ExtractActiveMemoryKeywords(ctx context.Context, input activeMemoryKeywordInput) (activeMemoryKeywordResult, error)

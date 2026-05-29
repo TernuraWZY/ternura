@@ -46,7 +46,7 @@ func TestAppSkillRegistryBuildsDefaultCapabilities(t *testing.T) {
 	}
 
 	instructions := registry.RuntimeInstructions()
-	for _, want := range []string{`<skill name="workspace">`, `<skill name="memory">`, `<skill name="schedule">`, `<skill name="web">`} {
+	for _, want := range []string{`<skill name="workspace">`, `<skill name="memory">`, `<skill name="schedule">`, `<skill name="web">`, `<skill name="grounding">`} {
 		if !strings.Contains(instructions, want) {
 			t.Fatalf("skill instructions missing %q:\n%s", want, instructions)
 		}

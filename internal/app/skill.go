@@ -30,6 +30,7 @@ func newCLISkillRegistry(cronTool *tool.CronTool) *agent.SkillRegistry {
 		newCLIMemorySkill(),
 		newScheduleSkill(cronTool, nil),
 		newWebSkill(),
+		newGroundingSkill(),
 	)
 	return registry
 }
@@ -48,6 +49,7 @@ func (s *agentServer) newSkillRegistry(sessionID string, cronTool *tool.CronTool
 		s.newMemorySkill(sessionIDFunc),
 		newScheduleSkill(cronTool, s.cron),
 		newWebSkill(),
+		newGroundingSkill(),
 	)
 	return registry
 }
@@ -102,7 +104,12 @@ func (s *agentServer) newMemorySkill(sessionID func() string) agent.Skill {
 			tool.NewForgetMemoryTool(s.forgetMemory),
 		},
 		Hooks: []agent.Hook{
-			newMemoryHook(s.memory, sessionID, withActiveMemoryKeywordExtractor(s.activeMemoryKeywords)),
+			newMemoryHook(
+				s.memory,
+				sessionID,
+				withActiveMemoryKeywordExtractor(s.activeMemoryKeywords),
+				withActiveMemorySummarizer(s.activeMemorySummary),
+			),
 			newToolMemoryHook(s.memory, sessionID),
 		},
 	})
@@ -151,5 +158,17 @@ func newWebSkill() agent.Skill {
 			"- Cite the fetched URL when relying on fetched page content.",
 		}, "\n"),
 		Tools: []tool.Tool{tool.NewWebFetchTool()},
+	})
+}
+
+func newGroundingSkill() agent.Skill {
+	return agent.NewStaticSkill(agent.SkillConfig{
+		Name:        "grounding",
+		Description: "Prevent final answers from presenting unverified tool, command, web, file, memory, or local-environment claims as facts.",
+		Instructions: strings.Join([]string{
+			"- Never report command output, installation status, fetched/search results, file changes, or memory changes unless the matching tool actually returned evidence in this run.",
+			"- If you have not called a tool, say what you can do next instead of inventing a result.",
+		}, "\n"),
+		Hooks: []agent.Hook{newToolGroundingGuardHook()},
 	})
 }

@@ -65,6 +65,7 @@ type agentServer struct {
 	store                *sessionStore
 	memory               *memoryStore
 	activeMemoryKeywords activeMemoryKeywordExtractor
+	activeMemorySummary  activeMemorySummarizer
 	cron                 *cron.Service
 	cronTool             *tool.CronTool
 	cronWake             chan struct{}
@@ -79,6 +80,7 @@ func newAgentServer(modelConf config.ModelConfig) *agentServer {
 	}
 	s.memory = newMemoryStore(s.store.root)
 	s.activeMemoryKeywords = newEinoActiveMemoryKeywordExtractor(modelConf)
+	s.activeMemorySummary = newEinoActiveMemorySummarizer(modelConf)
 	s.cron = cron.NewService(s.store.root)
 	s.cronTool = tool.NewCronTool(s.cronAdd, s.cronList, s.cronRemove)
 	feishuConfig := feishu.NewConfigFromEnv()
