@@ -23,14 +23,14 @@ func newAgentFromSkillRegistry(modelConf config.ModelConfig, registry *agent.Ski
 	)
 }
 
-func newCLISkillRegistry(cronTool *tool.CronTool) *agent.SkillRegistry {
+func newCLISkillRegistry(modelConf config.ModelConfig, cronTool *tool.CronTool) *agent.SkillRegistry {
 	registry := agent.NewSkillRegistry(loadOpenClawCompatibleSkills()...)
 	registry.Register(
 		newWorkspaceSkill(nil),
 		newCLIMemorySkill(),
 		newScheduleSkill(cronTool, nil),
 		newWebSkill(),
-		newGroundingSkill(),
+		newGroundingSkill(newEinoToolGroundingVerifier(modelConf)),
 	)
 	return registry
 }
@@ -49,7 +49,7 @@ func (s *agentServer) newSkillRegistry(sessionID string, cronTool *tool.CronTool
 		s.newMemorySkill(sessionIDFunc),
 		newScheduleSkill(cronTool, s.cron),
 		newWebSkill(),
-		newGroundingSkill(),
+		newGroundingSkill(s.toolGrounding),
 	)
 	return registry
 }
@@ -161,14 +161,15 @@ func newWebSkill() agent.Skill {
 	})
 }
 
-func newGroundingSkill() agent.Skill {
+func newGroundingSkill(verifier toolGroundingVerifier) agent.Skill {
 	return agent.NewStaticSkill(agent.SkillConfig{
 		Name:        "grounding",
 		Description: "Prevent final answers from presenting unverified tool, command, web, file, memory, or local-environment claims as facts.",
 		Instructions: strings.Join([]string{
-			"- Never report command output, installation status, fetched/search results, file changes, or memory changes unless the matching tool actually returned evidence in this run.",
-			"- If you have not called a tool, say what you can do next instead of inventing a result.",
+			"- Treat current-run tool results as evidence; conversation history and memory are context, not proof of external facts or side effects.",
+			"- Never report command output, installation status, fetched/search results, file changes, memory changes, or other current facts unless this run has matching tool evidence.",
+			"- If you have not called a tool, either call the appropriate tool or clearly say that you have not verified the claim.",
 		}, "\n"),
-		Hooks: []agent.Hook{newToolGroundingGuardHook()},
+		Hooks: []agent.Hook{newToolGroundingGuardHook(verifier)},
 	})
 }

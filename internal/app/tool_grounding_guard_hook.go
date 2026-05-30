@@ -12,15 +12,20 @@ import (
 
 var commandFencePattern = regexp.MustCompile("(?is)```\\s*(?:bash|sh|zsh|shell|terminal|console)\\b|(?m)^\\s*\\$\\s+\\S+")
 
-type toolGroundingGuardHook struct{}
+type toolGroundingGuardHook struct {
+	verifier toolGroundingVerifier
+}
 
 type toolGroundingDecision struct {
 	Block          bool
+	Verified       bool
 	Reason         string
 	MatchedClaims  []string
 	RequiredTools  []string
 	GroundedTools  []string
 	RequireSuccess bool
+	Unsupported    []toolGroundingUnsupportedClaim
+	VerifierClaims []toolGroundingVerifiedClaim
 }
 
 type toolGroundingClaim struct {
@@ -37,20 +42,24 @@ type toolGroundingEvidence struct {
 
 const toolGroundingGuardRetryKey = "tool_grounding_guard.retry"
 
-func newToolGroundingGuardHook() *toolGroundingGuardHook {
-	return &toolGroundingGuardHook{}
+func newToolGroundingGuardHook(verifier ...toolGroundingVerifier) *toolGroundingGuardHook {
+	hook := &toolGroundingGuardHook{}
+	if len(verifier) > 0 {
+		hook.verifier = verifier[0]
+	}
+	return hook
 }
 
 func (h *toolGroundingGuardHook) HookName() string {
 	return "tool_grounding_guard"
 }
 
-func (h *toolGroundingGuardHook) FinalizeRun(_ context.Context, run *agent.RunContext, result *agent.AgentRunResult) error {
+func (h *toolGroundingGuardHook) FinalizeRun(ctx context.Context, run *agent.RunContext, result *agent.AgentRunResult) error {
 	if result == nil || run == nil || strings.TrimSpace(result.Content) == "" {
 		return nil
 	}
 
-	decision := checkToolGrounding(run, result)
+	decision := h.checkToolGrounding(ctx, run, result)
 	if !decision.Block {
 		return nil
 	}
@@ -67,6 +76,15 @@ func (h *toolGroundingGuardHook) FinalizeRun(_ context.Context, run *agent.RunCo
 		})
 		return nil
 	}
+	if repaired, ok := h.repairFinalAnswer(ctx, run, result, decision); ok {
+		result.Content = repaired
+		result.Trace = append(result.Trace, agent.AgentTraceItem{
+			Type:    "guard",
+			Title:   "Tool grounding repair",
+			Content: decision.RepairTraceContent(),
+		})
+		return nil
+	}
 	result.Trace = append(result.Trace, agent.AgentTraceItem{
 		Type:    "guard",
 		Title:   "Tool grounding guard",
@@ -76,8 +94,72 @@ func (h *toolGroundingGuardHook) FinalizeRun(_ context.Context, run *agent.RunCo
 	return nil
 }
 
+func (h *toolGroundingGuardHook) repairFinalAnswer(ctx context.Context, run *agent.RunContext, result *agent.AgentRunResult, decision toolGroundingDecision) (string, bool) {
+	if h == nil || h.verifier == nil || run == nil || result == nil || len(decision.Unsupported) == 0 {
+		return "", false
+	}
+	repairer, ok := h.verifier.(toolGroundingRepairer)
+	if !ok {
+		return "", false
+	}
+	repaired, err := repairer.RepairToolGrounding(ctx, toolGroundingRepairInput{
+		UserMessage:       run.Query,
+		FinalAnswer:       result.Content,
+		ToolEvidence:      currentToolEvidence(run),
+		UnsupportedClaims: decision.Unsupported,
+	})
+	if err != nil {
+		return "", false
+	}
+	repaired = stripToolGroundingRepairReasoning(repaired)
+	if repaired == "" || repaired == strings.TrimSpace(result.Content) {
+		return "", false
+	}
+	verification, err := h.verifier.VerifyToolGrounding(ctx, toolGroundingVerificationInput{
+		UserMessage:  run.Query,
+		FinalAnswer:  repaired,
+		ToolEvidence: currentToolEvidence(run),
+	})
+	if err != nil {
+		return "", false
+	}
+	repairDecision := decisionFromToolGroundingVerification(verification, run)
+	if repairDecision.Block {
+		return "", false
+	}
+	return repaired, true
+}
+
+func (h *toolGroundingGuardHook) checkToolGrounding(ctx context.Context, run *agent.RunContext, result *agent.AgentRunResult) toolGroundingDecision {
+	if h != nil && h.verifier != nil {
+		verification, err := h.verifier.VerifyToolGrounding(ctx, toolGroundingVerificationInput{
+			UserMessage:  run.Query,
+			FinalAnswer:  result.Content,
+			ToolEvidence: currentToolEvidence(run),
+		})
+		if err == nil {
+			decision := decisionFromToolGroundingVerification(verification, run)
+			if decision.Verified {
+				if decision.HasClaimsNeedingEvidence() {
+					result.Trace = append(result.Trace, agent.AgentTraceItem{
+						Type:    "guard",
+						Title:   "Evidence verifier",
+						Content: decision.VerifierTraceContent(),
+					})
+				}
+				return toolGroundingDecision{}
+			}
+			if decision.Block {
+				return decision
+			}
+			return toolGroundingDecision{}
+		}
+	}
+	return checkToolGrounding(run, result)
+}
+
 func (h *toolGroundingGuardHook) requestRetry(run *agent.RunContext, decision toolGroundingDecision) bool {
-	if run == nil || len(decision.RequiredTools) == 0 {
+	if run == nil {
 		return false
 	}
 	if run.Metadata == nil {
@@ -93,14 +175,15 @@ func (h *toolGroundingGuardHook) requestRetry(run *agent.RunContext, decision to
 			required = append(required, tool.AgentTool(name))
 		}
 	}
-	if len(required) == 0 {
-		return false
-	}
 	run.Metadata[toolGroundingGuardRetryKey] = true
-	run.SetToolPolicy(agent.ToolPolicy{
-		Required:     true,
-		AllowedTools: required,
-	})
+	if len(required) == 0 {
+		run.SetToolPolicy(agent.RequireAnyTool())
+	} else {
+		run.SetToolPolicy(agent.ToolPolicy{
+			Required:     true,
+			AllowedTools: required,
+		})
+	}
 	return true
 }
 
@@ -317,6 +400,13 @@ func containsAny(content string, phrases ...string) bool {
 }
 
 func (d toolGroundingDecision) UserMessage() string {
+	if len(d.Unsupported) > 0 {
+		required := strings.Join(d.RequiredTools, "` / `")
+		if required == "" {
+			required = "合适的"
+		}
+		return fmt.Sprintf("我拦截了这次回复：它仍然包含没有本轮工具证据支撑的 claim。已调用的工具不等于每个结论都有证据，问题出在部分具体说法没有被当前工具结果覆盖。\n\n需要补充或重新调用 `%s` 工具后，再只基于工具结果作答。", required)
+	}
 	required := strings.Join(d.RequiredTools, "` / `")
 	if required == "" {
 		required = "工具"
@@ -332,7 +422,69 @@ func (d toolGroundingDecision) RetryTraceContent() string {
 	return content + "**Action**\n\nAutomatically retrying this run with a required tool policy instead of returning the ungrounded final answer."
 }
 
+func (d toolGroundingDecision) RepairTraceContent() string {
+	content := d.TraceContent()
+	if content != "" {
+		content += "\n\n"
+	}
+	return content + "**Action**\n\nRepaired the final answer by removing or qualifying unsupported claims instead of blocking the whole reply."
+}
+
+func (d toolGroundingDecision) VerifierTraceContent() string {
+	if len(d.VerifierClaims) == 0 {
+		return "Evidence verifier found no claims requiring current tool evidence."
+	}
+	lines := []string{"**Evidence verifier**", ""}
+	for _, claim := range d.VerifierClaims {
+		text := strings.TrimSpace(claim.Text)
+		if text == "" {
+			continue
+		}
+		lines = append(lines,
+			"- "+text,
+			fmt.Sprintf("  - needs current tool evidence: %t", claim.NeedsCurrentToolEvidence),
+			"  - evidence refs: "+strings.Join(claim.EvidenceRefs, ", "),
+		)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func (d toolGroundingDecision) HasClaimsNeedingEvidence() bool {
+	for _, claim := range d.VerifierClaims {
+		if claim.NeedsCurrentToolEvidence {
+			return true
+		}
+	}
+	return false
+}
+
 func (d toolGroundingDecision) TraceContent() string {
+	if len(d.Unsupported) > 0 {
+		lines := []string{
+			"**Reason**",
+			"",
+			"The evidence verifier found final-answer claims that require current-run tool evidence, but their evidence refs do not point to a successful current tool call.",
+			"",
+			"**Unsupported claims**",
+			"",
+		}
+		for _, claim := range d.Unsupported {
+			lines = append(lines, "- "+claim.Text)
+			if claim.Reason != "" {
+				lines = append(lines, "  - reason: "+claim.Reason)
+			}
+			if len(claim.EvidenceRefs) > 0 {
+				lines = append(lines, "  - evidence refs: "+strings.Join(claim.EvidenceRefs, ", "))
+			}
+		}
+		lines = append(lines, "", "**Grounded tools in this run**", "")
+		if len(d.GroundedTools) == 0 {
+			lines = append(lines, "None")
+		} else {
+			lines = append(lines, "`"+strings.Join(d.GroundedTools, "`, `")+"`")
+		}
+		return strings.TrimSpace(strings.Join(lines, "\n"))
+	}
 	sections := []string{
 		"**Reason**",
 		"",

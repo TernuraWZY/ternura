@@ -32,6 +32,140 @@ func TestToolGroundingGuardRetriesCommandResultWithoutBashEvidence(t *testing.T)
 	}
 }
 
+func TestToolGroundingGuardUsesVerifierEvidenceContract(t *testing.T) {
+	run := agent.NewRunContext("看一下最近三天行情", agent.RunModeSync)
+	verifier := &fakeToolGroundingVerifier{
+		result: toolGroundingVerification{Claims: []toolGroundingVerifiedClaim{{
+			Text:                     "513010 最近三天上涨",
+			NeedsCurrentToolEvidence: true,
+			Reason:                   "recent market data needs current-run evidence",
+			SuggestedTools:           []string{string(tool.AgentToolWebFetch)},
+		}}},
+	}
+	result := agent.AgentRunResult{Content: "513010 最近三天上涨，数据来源腾讯财经。"}
+
+	err := newToolGroundingGuardHook(verifier).FinalizeRun(context.Background(), run, &result)
+
+	if err != nil {
+		t.Fatalf("finalize run: %v", err)
+	}
+	if verifier.calls != 1 {
+		t.Fatalf("verifier calls = %d, want 1", verifier.calls)
+	}
+	if verifier.lastInput.UserMessage != "看一下最近三天行情" || verifier.lastInput.FinalAnswer != result.Content {
+		t.Fatalf("verifier input = %+v", verifier.lastInput)
+	}
+	policy := run.RequestedToolPolicy()
+	if !policy.Required || len(policy.AllowedTools) != 1 || policy.AllowedTools[0] != tool.AgentToolWebFetch {
+		t.Fatalf("policy = %+v, want required web_fetch", policy)
+	}
+	if len(result.Trace) != 1 || !strings.Contains(result.Trace[0].Content, "Unsupported claims") {
+		t.Fatalf("guard trace = %+v", result.Trace)
+	}
+}
+
+func TestToolGroundingGuardAllowsVerifierClaimsThatDoNotNeedCurrentEvidence(t *testing.T) {
+	run := agent.NewRunContext("解释一下什么是 ETF", agent.RunModeSync)
+	content := "ETF 是一种交易型开放式指数基金。"
+	verifier := &fakeToolGroundingVerifier{
+		result: toolGroundingVerification{Claims: []toolGroundingVerifiedClaim{{
+			Text:                     "ETF 是一种交易型开放式指数基金",
+			NeedsCurrentToolEvidence: false,
+		}}},
+	}
+	result := agent.AgentRunResult{Content: content}
+
+	err := newToolGroundingGuardHook(verifier).FinalizeRun(context.Background(), run, &result)
+
+	if err != nil {
+		t.Fatalf("finalize run: %v", err)
+	}
+	if result.Content != content {
+		t.Fatalf("content should be unchanged, got %q", result.Content)
+	}
+	if len(result.Trace) != 0 {
+		t.Fatalf("trace should stay quiet for no-evidence-needed claims: %+v", result.Trace)
+	}
+	if policy := run.RequestedToolPolicy(); !policy.Empty() {
+		t.Fatalf("policy = %+v, want empty", policy)
+	}
+}
+
+func TestToolGroundingGuardRepairsUnsupportedVerifierClaimsAfterRetry(t *testing.T) {
+	run := agent.NewRunContext("看一下 513010", agent.RunModeSync)
+	run.Metadata[toolGroundingGuardRetryKey] = true
+	verifier := &fakeToolGroundingVerifier{
+		results: []toolGroundingVerification{
+			{Claims: []toolGroundingVerifiedClaim{{
+				Text:                     "基金经理为刘依姗、张湛",
+				NeedsCurrentToolEvidence: true,
+				Reason:                   "current tool evidence did not include fund manager names",
+				SuggestedTools:           []string{string(tool.AgentToolWebFetch)},
+			}}},
+			{Claims: []toolGroundingVerifiedClaim{{
+				Text:                     "本轮工具结果没有覆盖基金经理字段",
+				NeedsCurrentToolEvidence: false,
+			}}},
+		},
+		repairResult: "513010 本轮抓到的是行情和净值数据；本轮工具结果没有覆盖基金经理字段。",
+	}
+	result := agent.AgentRunResult{Content: "513010 当前市价 0.639，基金经理为刘依姗、张湛。"}
+
+	err := newToolGroundingGuardHook(verifier).FinalizeRun(context.Background(), run, &result)
+
+	if err != nil {
+		t.Fatalf("finalize run: %v", err)
+	}
+	if verifier.calls != 2 {
+		t.Fatalf("verifier calls = %d, want 2", verifier.calls)
+	}
+	if verifier.repairCalls != 1 {
+		t.Fatalf("repair calls = %d, want 1", verifier.repairCalls)
+	}
+	if result.Content != verifier.repairResult {
+		t.Fatalf("content = %q, want repaired answer", result.Content)
+	}
+	if len(result.Trace) != 1 || result.Trace[0].Title != "Tool grounding repair" {
+		t.Fatalf("repair trace not appended: %+v", result.Trace)
+	}
+	if strings.Contains(result.Content, "刘依姗") || strings.Contains(result.Content, "张湛") {
+		t.Fatalf("unsupported claim should be removed: %q", result.Content)
+	}
+}
+
+func TestToolGroundingGuardStripsThinkFromRepairedAnswer(t *testing.T) {
+	run := agent.NewRunContext("看一下 MU", agent.RunModeSync)
+	run.Metadata[toolGroundingGuardRetryKey] = true
+	verifier := &fakeToolGroundingVerifier{
+		results: []toolGroundingVerification{
+			{Claims: []toolGroundingVerifiedClaim{{
+				Text:                     "MU 当前价格 $971",
+				NeedsCurrentToolEvidence: true,
+				Reason:                   "unsupported market quote",
+				SuggestedTools:           []string{string(tool.AgentToolWebFetch)},
+			}}},
+			{Claims: []toolGroundingVerifiedClaim{{
+				Text:                     "本轮没有拿到可靠 MU 行情",
+				NeedsCurrentToolEvidence: false,
+			}}},
+		},
+		repairResult: "<think>先删除没证据的价格。</think>\n本轮没有拿到可靠 MU 行情。",
+	}
+	result := agent.AgentRunResult{Content: "MU 当前价格 $971。"}
+
+	err := newToolGroundingGuardHook(verifier).FinalizeRun(context.Background(), run, &result)
+
+	if err != nil {
+		t.Fatalf("finalize run: %v", err)
+	}
+	if result.Content != "本轮没有拿到可靠 MU 行情。" {
+		t.Fatalf("content = %q, want stripped repaired answer", result.Content)
+	}
+	if strings.Contains(result.Content, "<think>") {
+		t.Fatalf("repaired content should not contain think block: %q", result.Content)
+	}
+}
+
 func TestToolGroundingGuardBlocksInstallClaimEvenWhenOnlyWebFetchRan(t *testing.T) {
 	run := agent.NewRunContext("帮我安装 skillhub", agent.RunModeSync)
 	run.Metadata[toolGroundingGuardRetryKey] = true
@@ -126,4 +260,35 @@ func TestToolGroundingGuardBlocksSuccessfulInstallClaimAfterFailedBash(t *testin
 	if !strings.Contains(result.Content, "command or installation success") {
 		t.Fatalf("guarded content = %q", result.Content)
 	}
+}
+
+type fakeToolGroundingVerifier struct {
+	result       toolGroundingVerification
+	results      []toolGroundingVerification
+	err          error
+	calls        int
+	lastInput    toolGroundingVerificationInput
+	repairResult string
+	repairErr    error
+	repairCalls  int
+	lastRepair   toolGroundingRepairInput
+}
+
+func (f *fakeToolGroundingVerifier) VerifyToolGrounding(ctx context.Context, input toolGroundingVerificationInput) (toolGroundingVerification, error) {
+	idx := f.calls
+	f.calls++
+	f.lastInput = input
+	if len(f.results) > 0 {
+		if idx >= len(f.results) {
+			idx = len(f.results) - 1
+		}
+		return f.results[idx], f.err
+	}
+	return f.result, f.err
+}
+
+func (f *fakeToolGroundingVerifier) RepairToolGrounding(ctx context.Context, input toolGroundingRepairInput) (string, error) {
+	f.repairCalls++
+	f.lastRepair = input
+	return f.repairResult, f.repairErr
 }

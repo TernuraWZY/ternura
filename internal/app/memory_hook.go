@@ -171,9 +171,17 @@ func (h *memoryHook) applyAISummary(ctx context.Context, run *agent.RunContext, 
 		log.Printf("active memory summarization: %v", err)
 		return
 	}
+	if result.Relevant != nil && !*result.Relevant {
+		recall.Summary = ""
+		recall.RawSummary = ""
+		recall.Summarized = true
+		recall.Status = "no_relevant_memory"
+		return
+	}
 	summary := strings.TrimSpace(result.Summary)
 	if summary == "" {
 		recall.Summary = ""
+		recall.RawSummary = ""
 		recall.Summarized = true
 		recall.Status = "no_relevant_memory"
 		return
@@ -185,6 +193,9 @@ func (h *memoryHook) applyAISummary(ctx context.Context, run *agent.RunContext, 
 func formatActiveMemoryTrace(recall activeMemoryRecall) string {
 	summary := strings.TrimSpace(recall.Summary)
 	searchQuery := strings.TrimSpace(recall.SearchQuery)
+	if summary == "" && (recall.Skipped || recall.Status == "no_relevant_memory") {
+		return ""
+	}
 	if summary == "" && searchQuery == "" && len(recall.Keywords) == 0 {
 		return ""
 	}

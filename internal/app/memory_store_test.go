@@ -412,6 +412,52 @@ func TestMemoryHookSummarizesRecallBeforeInjection(t *testing.T) {
 	}
 }
 
+func TestMemoryHookSkipsInjectionAndTraceWhenSummaryIsNotRelevant(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	if _, err := store.Remember(context.Background(), tool.MemoryItem{
+		Category: tool.MemoryCategoryProject,
+		Content:  "SkillHub command is not available on PATH.",
+	}); err != nil {
+		t.Fatalf("remember project: %v", err)
+	}
+	extractor := &fakeActiveMemoryKeywordExtractor{
+		result: activeMemoryKeywordResult{
+			ShouldRecall: true,
+			QueryMode:    "recent",
+			Keywords:     []string{"skillhub"},
+			SearchQuery:  "skillhub",
+		},
+	}
+	relevant := false
+	summarizer := &fakeActiveMemorySummarizer{
+		result: activeMemorySummaryResult{Relevant: &relevant, Summary: "SkillHub command is not available on PATH."},
+	}
+	hook := newMemoryHook(
+		store,
+		func() string { return "session-test" },
+		withActiveMemoryKeywordExtractor(extractor),
+		withActiveMemorySummarizer(summarizer),
+	)
+	run := agent.NewRunContext("美光科技现在股价多少", agent.RunModeSync)
+	result := agent.AgentRunResult{Content: "本轮没有拿到可靠行情。"}
+
+	if err := hook.BeforeModelCall(context.Background(), run); err != nil {
+		t.Fatalf("before model call: %v", err)
+	}
+	if rendered := run.RuntimeContextText(); strings.Contains(rendered, "Active Memory") || strings.Contains(rendered, "SkillHub") {
+		t.Fatalf("irrelevant summary should not be injected:\n%s", rendered)
+	}
+	if err := hook.FinalizeRun(context.Background(), run, &result); err != nil {
+		t.Fatalf("finalize run: %v", err)
+	}
+	if len(result.Trace) != 0 {
+		t.Fatalf("irrelevant summary should not be shown as trace: %+v", result.Trace)
+	}
+	if summarizer.calls != 1 {
+		t.Fatalf("summarizer calls = %d, want 1", summarizer.calls)
+	}
+}
+
 func TestMemoryHookAddsActiveMemoryTrace(t *testing.T) {
 	store := newMemoryStore(t.TempDir())
 	if _, err := store.Remember(context.Background(), tool.MemoryItem{
