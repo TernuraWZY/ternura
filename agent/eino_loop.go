@@ -17,8 +17,6 @@ import (
 	"ternura/tool"
 )
 
-const einoReactMaxStep = 100
-
 type einoAgentRun struct {
 	agent   *Agent
 	runCtx  *RunContext
@@ -72,7 +70,7 @@ func (a *Agent) newEinoAgentRun(ctx context.Context, runCtx *RunContext, result 
 				return fmt.Sprintf("tool not found: %s", name), nil
 			},
 		},
-		MaxStep:               einoReactMaxStep,
+		MaxStep:               a.reactMaxSteps(),
 		MessageModifier:       runtime.messageModifier,
 		StreamToolCallChecker: runtime.streamContainsToolCall,
 	})
@@ -170,7 +168,16 @@ func (r *einoAgentRun) buildModelMessages(ctx context.Context, input []*schema.M
 
 func (r *einoAgentRun) beforeModelCall(ctx context.Context) error {
 	if r.runCtx != nil {
-		r.runCtx.ModelCallCount++
+		if err := r.runCtx.reserveModelCall(); err != nil {
+			return err
+		}
+		r.runCtx.SetContextBlockWithPriority(
+			"run-budget",
+			"Run Budget",
+			r.runCtx.BudgetContextText(),
+			RuntimeContextPriorityHigh,
+			1200,
+		)
 	}
 	if err := r.agent.hooks.BeforeModelCall(ctx, r.runCtx); err != nil {
 		return err
@@ -184,6 +191,13 @@ func (r *einoAgentRun) beforeModelCall(ctx context.Context) error {
 	r.applyToolPolicyContext(policy)
 	r.rememberRequiredToolPolicy(policy)
 	return nil
+}
+
+func (a *Agent) reactMaxSteps() int {
+	if a == nil || a.runLimits.MaxReactSteps <= 0 {
+		return defaultMaxReactSteps
+	}
+	return a.runLimits.MaxReactSteps
 }
 
 func (r *einoAgentRun) applyToolPolicyContext(policy ToolPolicy) {
@@ -404,9 +418,18 @@ func (r *einoAgentRun) toolCallMiddleware() compose.ToolMiddleware {
 					},
 				}
 				if r.runCtx != nil {
-					r.runCtx.ToolCallCount++
+					if err := r.runCtx.reserveToolCall(tool.AgentTool(input.Name)); err != nil {
+						toolResult := ToolResult{
+							Call:    call,
+							Content: budgetExceededToolContent(err),
+							Err:     err,
+						}
+						toolResult = limitToolResult(toolResult)
+						r.rememberToolResult(toolResult)
+						r.runCtx.recordToolResult(toolResult)
+						return &compose.ToolOutput{Result: toolResult.Content}, nil
+					}
 				}
-
 				if err := r.agent.hooks.BeforeToolCall(ctx, r.runCtx, &call); err != nil {
 					toolResult := ToolResult{
 						Call:    call,

@@ -262,6 +262,46 @@ func TestToolGroundingGuardBlocksSuccessfulInstallClaimAfterFailedBash(t *testin
 	}
 }
 
+func TestToolGroundingGuardRetriesPseudoToolCallMarkup(t *testing.T) {
+	run := agent.NewRunContext("你再看", agent.RunModeSync)
+	result := agent.AgentRunResult{
+		Content: "让我实际搜一下：\n\n<brief>\n<invoke name=\"web_fetch\">\n<parameter name=\"url\">https://example.com</parameter>\n</invoke>\n</minimax:tool_call>",
+	}
+
+	err := newToolGroundingGuardHook().FinalizeRun(context.Background(), run, &result)
+
+	if err != nil {
+		t.Fatalf("finalize run: %v", err)
+	}
+	policy := run.RequestedToolPolicy()
+	if !policy.Required || len(policy.AllowedTools) != 1 || policy.AllowedTools[0] != tool.AgentToolWebFetch {
+		t.Fatalf("policy = %+v, want required web_fetch", policy)
+	}
+	if len(result.Trace) != 1 || !strings.Contains(result.Trace[0].Content, "unexecuted tool call markup") {
+		t.Fatalf("guard trace should explain pseudo tool call: %+v", result.Trace)
+	}
+}
+
+func TestToolGroundingGuardBlocksPseudoToolCallMarkupAfterRetry(t *testing.T) {
+	run := agent.NewRunContext("你再看", agent.RunModeSync)
+	run.Metadata[toolGroundingGuardRetryKey] = true
+	result := agent.AgentRunResult{
+		Content: "让我实际搜一下：\n\n<brief>\n<invoke name=\"web_fetch\">\n<parameter name=\"url\">https://example.com</parameter>\n</invoke>\n</minimax:tool_call>",
+	}
+
+	err := newToolGroundingGuardHook().FinalizeRun(context.Background(), run, &result)
+
+	if err != nil {
+		t.Fatalf("finalize run: %v", err)
+	}
+	if strings.Contains(result.Content, "<invoke") || strings.Contains(result.Content, "minimax:tool_call") {
+		t.Fatalf("pseudo tool call should not be returned to user: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "工具调用文本") || !strings.Contains(result.Content, "没有真正执行工具") {
+		t.Fatalf("blocked content should explain pseudo tool call: %q", result.Content)
+	}
+}
+
 type fakeToolGroundingVerifier struct {
 	result       toolGroundingVerification
 	results      []toolGroundingVerification

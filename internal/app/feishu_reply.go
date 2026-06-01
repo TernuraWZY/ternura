@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"ternura/agent"
@@ -10,11 +11,16 @@ import (
 
 const maxFeishuTraceRunes = 4000
 
+var feishuEmailPattern = regexp.MustCompile(`(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b`)
+
 func formatFeishuAgentReply(result agent.AgentRunResult) feishu.Reply {
 	memoryItems := traceItemsByType(result.Trace, "memory")
 	thinkItems := traceItemsByType(result.Trace, "think")
 	toolItems := traceItemsByType(result.Trace, "tool")
-	content := strings.TrimSpace(result.Content)
+	content := sanitizeFeishuReplyText(strings.TrimSpace(result.Content))
+	memoryItems = sanitizeTraceItemsForFeishu(memoryItems)
+	thinkItems = sanitizeTraceItemsForFeishu(thinkItems)
+	toolItems = sanitizeTraceItemsForFeishu(toolItems)
 	if len(memoryItems) == 0 && len(thinkItems) == 0 && len(toolItems) == 0 {
 		return feishu.Reply{Content: content}
 	}
@@ -145,10 +151,26 @@ func feishuCollapsiblePanel(title string, count int, content string) map[string]
 }
 
 func limitFeishuTraceContent(content string) string {
-	content = strings.TrimSpace(content)
+	content = sanitizeFeishuReplyText(strings.TrimSpace(content))
 	runes := []rune(content)
 	if len(runes) <= maxFeishuTraceRunes {
 		return content
 	}
 	return string(runes[:maxFeishuTraceRunes]) + "\n\n...（过程信息较长，已截断）"
+}
+
+func sanitizeTraceItemsForFeishu(items []agent.AgentTraceItem) []agent.AgentTraceItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]agent.AgentTraceItem, 0, len(items))
+	for _, item := range items {
+		item.Content = sanitizeFeishuReplyText(item.Content)
+		out = append(out, item)
+	}
+	return out
+}
+
+func sanitizeFeishuReplyText(content string) string {
+	return feishuEmailPattern.ReplaceAllString(content, "[email redacted]")
 }

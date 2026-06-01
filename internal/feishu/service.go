@@ -25,6 +25,7 @@ const (
 	defaultMaxEventSize       = 1 << 20
 	defaultProcessingReaction = "OneSecond"
 	defaultProcessingDelay    = time.Second
+	defaultAgentTurnTimeout   = 2 * time.Minute
 )
 
 type Config struct {
@@ -41,6 +42,7 @@ type Config struct {
 	ProcessingReaction     bool
 	ProcessingReactionType string
 	ProcessingDelay        time.Duration
+	AgentTurnTimeout       time.Duration
 	AllowOpenIDs           []string
 	HTTPClient             *http.Client
 }
@@ -112,6 +114,7 @@ func NewConfigFromEnv() Config {
 		ProcessingReaction:     envBool("FEISHU_PROCESSING_REACTION", true),
 		ProcessingReactionType: envDefault("FEISHU_PROCESSING_REACTION_TYPE", defaultProcessingReaction),
 		ProcessingDelay:        envDuration("FEISHU_PROCESSING_DELAY", defaultProcessingDelay),
+		AgentTurnTimeout:       envDuration("TERNURA_AGENT_TURN_TIMEOUT", defaultAgentTurnTimeout),
 		AllowOpenIDs:           splitCSV(os.Getenv("FEISHU_ALLOW_OPEN_IDS")),
 	}
 }
@@ -122,6 +125,9 @@ func NewService(cfg Config, handle HandlerFunc) *Service {
 	cfg.EventMode = strings.ToLower(strings.TrimSpace(firstNonEmpty(cfg.EventMode, "websocket")))
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	if cfg.AgentTurnTimeout <= 0 {
+		cfg.AgentTurnTimeout = defaultAgentTurnTimeout
 	}
 	return &Service{
 		cfg:    cfg,
@@ -191,7 +197,7 @@ func (s *Service) process(ctx context.Context, inbound InboundMessage) {
 	if s.handle == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.AgentTurnTimeout)
 	defer cancel()
 
 	replyMessage, err := s.handleWithProcessingReaction(ctx, inbound)

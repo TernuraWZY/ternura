@@ -66,3 +66,50 @@ func TestWebFetchToolTruncatesContent(t *testing.T) {
 		t.Fatalf("expected text truncation marker:\n%s", output)
 	}
 }
+
+func TestWebFetchToolMarksNonSuccessStatusUnusable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing page", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	output, err := NewWebFetchTool().InvokableRun(context.Background(), `{"url":"`+server.URL+`"}`)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, want := range []string{
+		"Status: 404 Not Found",
+		"Usable: false",
+		"non-success HTTP status",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestWebFetchToolRejectsSearchResultURL(t *testing.T) {
+	output, err := NewWebFetchTool().InvokableRun(context.Background(), `{"url":"https://www.google.com/search?q=ternura"}`)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(output, "Usable: false") || !strings.Contains(output, "search result pages are not supported") {
+		t.Fatalf("search URL should be marked unusable:\n%s", output)
+	}
+}
+
+func TestWebFetchToolMarksCaptchaPageUnusable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<html><body>正在进行安全验证，请完成验证码。</body></html>`))
+	}))
+	defer server.Close()
+
+	output, err := NewWebFetchTool().InvokableRun(context.Background(), `{"url":"`+server.URL+`"}`)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(output, "Usable: false") || !strings.Contains(output, "captcha") {
+		t.Fatalf("captcha page should be marked unusable:\n%s", output)
+	}
+}

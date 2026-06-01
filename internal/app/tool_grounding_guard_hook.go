@@ -11,6 +11,7 @@ import (
 )
 
 var commandFencePattern = regexp.MustCompile("(?is)```\\s*(?:bash|sh|zsh|shell|terminal|console)\\b|(?m)^\\s*\\$\\s+\\S+")
+var pseudoToolCallPattern = regexp.MustCompile(`(?is)<invoke\s+name=["']?([a-zA-Z0-9_:-]+)["']?|</?minimax:tool_call\b|<brief>`)
 
 type toolGroundingGuardHook struct {
 	verifier toolGroundingVerifier
@@ -131,7 +132,11 @@ func (h *toolGroundingGuardHook) repairFinalAnswer(ctx context.Context, run *age
 }
 
 func (h *toolGroundingGuardHook) checkToolGrounding(ctx context.Context, run *agent.RunContext, result *agent.AgentRunResult) toolGroundingDecision {
-	if h != nil && h.verifier != nil {
+	heuristic := checkToolGrounding(run, result)
+	if heuristic.Block {
+		return heuristic
+	}
+	if h != nil && h.verifier != nil && shouldVerifyToolGrounding(run, result) {
 		verification, err := h.verifier.VerifyToolGrounding(ctx, toolGroundingVerificationInput{
 			UserMessage:  run.Query,
 			FinalAnswer:  result.Content,
@@ -155,7 +160,7 @@ func (h *toolGroundingGuardHook) checkToolGrounding(ctx context.Context, run *ag
 			return toolGroundingDecision{}
 		}
 	}
-	return checkToolGrounding(run, result)
+	return heuristic
 }
 
 func (h *toolGroundingGuardHook) requestRetry(run *agent.RunContext, decision toolGroundingDecision) bool {
@@ -168,12 +173,25 @@ func (h *toolGroundingGuardHook) requestRetry(run *agent.RunContext, decision to
 	if retried, ok := run.Metadata[toolGroundingGuardRetryKey].(bool); ok && retried {
 		return false
 	}
+	if !run.CanCallModel() {
+		return false
+	}
 	required := make([]tool.AgentTool, 0, len(decision.RequiredTools))
 	for _, name := range decision.RequiredTools {
 		name = strings.TrimSpace(name)
-		if name != "" {
-			required = append(required, tool.AgentTool(name))
+		if name == "" {
+			continue
 		}
+		toolName := tool.AgentTool(name)
+		if run.CanCallTool(toolName) {
+			required = append(required, toolName)
+		}
+	}
+	if len(decision.RequiredTools) > 0 && len(required) == 0 {
+		return false
+	}
+	if len(required) == 0 && !run.CanCallAnyTool() {
+		return false
 	}
 	run.Metadata[toolGroundingGuardRetryKey] = true
 	if len(required) == 0 {
@@ -187,9 +205,38 @@ func (h *toolGroundingGuardHook) requestRetry(run *agent.RunContext, decision to
 	return true
 }
 
+func shouldVerifyToolGrounding(run *agent.RunContext, result *agent.AgentRunResult) bool {
+	if run == nil || result == nil {
+		return false
+	}
+	content := strings.TrimSpace(result.Content)
+	if content == "" || looksLikeGroundingSafeDisclosure(strings.ToLower(content)) {
+		return false
+	}
+	if len(run.ToolResults()) > 0 {
+		return true
+	}
+	lower := strings.ToLower(content)
+	return containsAny(lower,
+		"搜索", "查到", "查询", "检索", "调研", "官网", "网页", "页面显示", "数据来源",
+		"最近", "最新", "当前", "实时", "行情", "上涨", "下跌", "价格", "天气", "汇率",
+		"安装", "执行", "运行", "创建", "删除", "更新", "保存", "已设置", "已完成",
+	)
+}
+
 func checkToolGrounding(run *agent.RunContext, result *agent.AgentRunResult) toolGroundingDecision {
 	content := strings.TrimSpace(result.Content)
 	lower := strings.ToLower(content)
+	if tools := pseudoToolCallTools(content); len(tools) > 0 {
+		return toolGroundingDecision{
+			Block:          true,
+			Reason:         "unexecuted tool call markup",
+			MatchedClaims:  []string{"unexecuted tool call markup"},
+			RequiredTools:  agentToolNames(tools),
+			GroundedTools:  collectToolGroundingEvidence(run, result).names(),
+			RequireSuccess: false,
+		}
+	}
 	if looksLikeGroundingSafeDisclosure(lower) {
 		return toolGroundingDecision{}
 	}
@@ -216,6 +263,27 @@ func checkToolGrounding(run *agent.RunContext, result *agent.AgentRunResult) too
 		}
 	}
 	return toolGroundingDecision{}
+}
+
+func pseudoToolCallTools(content string) []tool.AgentTool {
+	matches := pseudoToolCallPattern.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	tools := make([]tool.AgentTool, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(match[1])
+		if name != "" {
+			tools = append(tools, tool.AgentTool(name))
+		}
+	}
+	if len(tools) == 0 {
+		return nil
+	}
+	return tools
 }
 
 func toolGroundingClaims() []toolGroundingClaim {
@@ -400,6 +468,13 @@ func containsAny(content string, phrases ...string) bool {
 }
 
 func (d toolGroundingDecision) UserMessage() string {
+	if d.Reason == "unexecuted tool call markup" {
+		required := strings.Join(d.RequiredTools, "` / `")
+		if required == "" {
+			required = "工具"
+		}
+		return fmt.Sprintf("我拦截了这次回复：它生成了 `%s` 的工具调用文本，但这只是普通文本，并没有真正执行工具。\n\n我不会把这类伪工具调用发给你。请重新发起这个请求，我会先实际调用工具；如果没有拿到有效信息，会直接说明没有 fetch 到有效结果。", required)
+	}
 	if len(d.Unsupported) > 0 {
 		required := strings.Join(d.RequiredTools, "` / `")
 		if required == "" {

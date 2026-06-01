@@ -130,3 +130,25 @@ func TestLimitFeishuTraceContentTruncatesLongTrace(t *testing.T) {
 		t.Fatalf("limited trace missing truncation marker: %q", limited)
 	}
 }
+
+func TestFormatFeishuAgentReplyRedactsEmailsInTrace(t *testing.T) {
+	reply := formatFeishuAgentReply(agent.AgentRunResult{
+		Content: "本轮没有拿到有效信息。",
+		Trace: []agent.AgentTraceItem{{
+			Type:    "tool",
+			Title:   "Tool use: web_fetch",
+			Content: "举报邮箱：jubao@contact.sohu.com",
+		}},
+	})
+
+	if strings.Contains(reply.Content, "jubao@contact.sohu.com") {
+		t.Fatalf("fallback reply should redact email:\n%s", reply.Content)
+	}
+	if !strings.Contains(reply.Content, "[email redacted]") {
+		t.Fatalf("fallback reply missing redaction marker:\n%s", reply.Content)
+	}
+	card := fmt.Sprint(reply.Card)
+	if strings.Contains(card, "jubao@contact.sohu.com") {
+		t.Fatalf("card should redact email:\n%s", card)
+	}
+}

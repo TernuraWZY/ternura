@@ -8,16 +8,20 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
 
 const (
-	defaultWebFetchMaxChars = 12000
-	maxWebFetchMaxChars     = 30000
-	maxWebFetchReadBytes    = 2 * 1024 * 1024
+	defaultWebFetchMaxChars     = 5000
+	maxWebFetchMaxChars         = 12000
+	maxWebFetchReadBytes        = 512 * 1024
+	maxWebFetchFailureReadBytes = 16 * 1024
+	defaultWebFetchTimeout      = 8 * time.Second
 )
 
 var (
@@ -35,12 +39,12 @@ type WebFetchTool struct {
 
 type WebFetchParam struct {
 	URL      string `json:"url" jsonschema:"required" jsonschema_description:"The absolute http or https URL to fetch."`
-	MaxChars int    `json:"max_chars,omitempty" jsonschema_description:"Maximum characters to return. Defaults to 12000; capped at 30000."`
+	MaxChars int    `json:"max_chars,omitempty" jsonschema_description:"Maximum characters to return. Defaults to 5000; capped at 12000."`
 }
 
 func NewWebFetchTool() *WebFetchTool {
 	t := &WebFetchTool{
-		client: &http.Client{Timeout: 15 * time.Second},
+		client: &http.Client{Timeout: webFetchTimeoutFromEnv()},
 	}
 	t.agentTool = newAgentTool(
 		AgentToolWebFetch,
@@ -56,6 +60,12 @@ func (t *WebFetchTool) run(ctx context.Context, params WebFetchParam) (string, e
 		return "", err
 	}
 	maxChars := normalizeWebFetchMaxChars(params.MaxChars)
+	if reason := unsupportedFetchURLReason(targetURL); reason != "" {
+		return formatWebFetchOutput(webFetchOutput{
+			URL:           targetURL,
+			FailureReason: reason,
+		}), nil
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
@@ -70,18 +80,29 @@ func (t *WebFetchTool) run(ctx context.Context, params WebFetchParam) (string, e
 	}
 	defer resp.Body.Close()
 
-	limited := io.LimitReader(resp.Body, maxWebFetchReadBytes+1)
+	readLimit := maxWebFetchReadBytes
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		readLimit = maxWebFetchFailureReadBytes
+	}
+	limited := io.LimitReader(resp.Body, int64(readLimit)+1)
 	body, err := io.ReadAll(limited)
 	if err != nil {
 		return "", err
 	}
-	truncatedRead := len(body) > maxWebFetchReadBytes
+	truncatedRead := len(body) > readLimit
 	if truncatedRead {
-		body = body[:maxWebFetchReadBytes]
+		body = body[:readLimit]
 	}
 
 	contentType := resp.Header.Get("Content-Type")
 	text := webFetchBodyToText(body, contentType)
+	failureReason := ""
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		failureReason = fmt.Sprintf("non-success HTTP status %s; do not use this page as factual evidence", resp.Status)
+	} else if reason := blockedPageReason(text); reason != "" {
+		failureReason = reason
+		maxChars = min(maxChars, 1000)
+	}
 	text, truncatedText := trimWebFetchText(text, maxChars)
 
 	return formatWebFetchOutput(webFetchOutput{
@@ -92,6 +113,7 @@ func (t *WebFetchTool) run(ctx context.Context, params WebFetchParam) (string, e
 		Body:          text,
 		ReadTruncated: truncatedRead,
 		TextTruncated: truncatedText,
+		FailureReason: failureReason,
 	}), nil
 }
 
@@ -103,6 +125,7 @@ type webFetchOutput struct {
 	Body          string
 	ReadTruncated bool
 	TextTruncated bool
+	FailureReason string
 }
 
 func normalizeFetchURL(rawURL string) (string, error) {
@@ -125,12 +148,57 @@ func normalizeFetchURL(rawURL string) (string, error) {
 
 func normalizeWebFetchMaxChars(value int) int {
 	if value <= 0 {
-		return defaultWebFetchMaxChars
+		return envInt("TERNURA_WEB_FETCH_MAX_CHARS", defaultWebFetchMaxChars)
 	}
 	if value > maxWebFetchMaxChars {
 		return maxWebFetchMaxChars
 	}
 	return value
+}
+
+func unsupportedFetchURLReason(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(parsed.Hostname())
+	path := strings.ToLower(parsed.EscapedPath())
+	query := strings.ToLower(parsed.RawQuery)
+	switch {
+	case strings.Contains(host, "google.") && path == "/search":
+		return "search result pages are not supported by web_fetch; use a concrete result URL instead"
+	case strings.Contains(host, "bing.com") && path == "/search":
+		return "search result pages are not supported by web_fetch; use a concrete result URL instead"
+	case strings.Contains(host, "baidu.com") && path == "/s":
+		return "search result pages are not supported by web_fetch; use a concrete result URL instead"
+	case strings.Contains(host, "sogou.com") && strings.Contains(path, "web"):
+		return "search result pages are not supported by web_fetch; use a concrete result URL instead"
+	case strings.Contains(query, "captcha") || strings.Contains(path, "captcha"):
+		return "captcha pages are not usable evidence for web_fetch"
+	default:
+		return ""
+	}
+}
+
+func blockedPageReason(text string) string {
+	lower := strings.ToLower(text)
+	if containsAny(lower,
+		"captcha", "verify you are human", "security check", "access denied", "forbidden",
+		"cloudflare", "enable javascript and cookies", "unusual traffic",
+		"验证码", "人机验证", "安全验证", "访问受限", "请完成验证", "正在进行安全验证",
+	) {
+		return "the page appears to be blocked by captcha, anti-bot, or access control; do not use it as factual evidence"
+	}
+	return ""
+}
+
+func containsAny(value string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func webFetchBodyToText(body []byte, contentType string) string {
@@ -192,6 +260,9 @@ func formatWebFetchOutput(output webFetchOutput) string {
 	if output.ContentType != "" {
 		fmt.Fprintf(&b, "Content-Type: %s\n", output.ContentType)
 	}
+	if output.FailureReason != "" {
+		fmt.Fprintf(&b, "Usable: false\nFailure reason: %s\n", output.FailureReason)
+	}
 	if output.ReadTruncated || output.TextTruncated {
 		b.WriteString("Truncated: true\n")
 	}
@@ -201,4 +272,33 @@ func formatWebFetchOutput(output webFetchOutput) string {
 	}
 	fmt.Fprintf(&b, "\nContent:\n%s\n", output.Body)
 	return b.String()
+}
+
+func webFetchTimeoutFromEnv() time.Duration {
+	value := strings.TrimSpace(os.Getenv("TERNURA_WEB_FETCH_TIMEOUT"))
+	if value == "" {
+		return defaultWebFetchTimeout
+	}
+	if duration, err := time.ParseDuration(value); err == nil && duration > 0 {
+		return duration
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return defaultWebFetchTimeout
+}
+
+func envInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	if parsed > maxWebFetchMaxChars {
+		return maxWebFetchMaxChars
+	}
+	return parsed
 }

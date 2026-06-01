@@ -27,6 +27,7 @@ type Agent struct {
 	messages       []*schema.Message
 	tools          map[tool.AgentTool]tool.Tool
 	hooks          *HookManager
+	runLimits      RunLimits
 }
 
 type AgentRunResult struct {
@@ -81,6 +82,12 @@ func WithHookManager(manager *HookManager) AgentOption {
 	}
 }
 
+func WithRunLimits(limits RunLimits) AgentOption {
+	return func(a *Agent) {
+		a.runLimits = normalizeRunLimits(limits)
+	}
+}
+
 func NewAgent(modelConf config.ModelConfig, systemPrompt string, tools []tool.Tool, opts ...AgentOption) *Agent {
 	chatModel, err := einoopenai.NewChatModel(context.Background(), &einoopenai.ChatModelConfig{
 		BaseURL: modelConf.BaseURL,
@@ -102,6 +109,7 @@ func NewAgent(modelConf config.ModelConfig, systemPrompt string, tools []tool.To
 		tools:          make(map[tool.AgentTool]tool.Tool),
 		messages:       make([]*schema.Message, 0),
 		hooks:          NewHookManager(),
+		runLimits:      RunLimitsFromEnv(),
 	}
 	for _, t := range tools {
 		a.tools[t.ToolName()] = t
@@ -147,6 +155,7 @@ func (a *Agent) Run(ctx context.Context, query string) (string, error) {
 // RunWithTrace 提供单次用户请求 query 的 tool loop，返回最终内容和本轮的 think/tool trace。
 func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRunResult, runErr error) {
 	runCtx := NewRunContext(query, RunModeSync)
+	runCtx.SetRunLimits(a.runLimits)
 	if err := a.hooks.BeforeRun(ctx, runCtx); err != nil {
 		return result, err
 	}
@@ -167,10 +176,20 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 	for {
 		runtime, err := a.newEinoAgentRun(ctx, runCtx, &result, nil)
 		if err != nil {
+			if errors.Is(err, ErrRunBudgetExceeded) {
+				result.Content = budgetExceededFinalMessage(err)
+				result.Trace = append(result.Trace, budgetExceededTrace(err))
+				return result, nil
+			}
 			return result, err
 		}
 		message, err := runtime.Generate(ctx)
 		if err != nil {
+			if errors.Is(err, ErrRunBudgetExceeded) {
+				result.Content = budgetExceededFinalMessage(err)
+				result.Trace = append(result.Trace, budgetExceededTrace(err))
+				return result, nil
+			}
 			return AgentRunResult{}, err
 		}
 		if message == nil {
@@ -194,6 +213,7 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 
 func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentStreamEvent) error) (result AgentRunResult, runErr error) {
 	runCtx := NewRunContext(query, RunModeStreaming)
+	runCtx.SetRunLimits(a.runLimits)
 	if err := a.hooks.BeforeRun(ctx, runCtx); err != nil {
 		return result, err
 	}
@@ -215,10 +235,26 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 	for {
 		runtime, err := a.newEinoAgentRun(ctx, runCtx, &result, emit)
 		if err != nil {
+			if errors.Is(err, ErrRunBudgetExceeded) {
+				result.Content = budgetExceededFinalMessage(err)
+				result.Trace = append(result.Trace, budgetExceededTrace(err))
+				return emitBudgetExceededDone(emit, result, result.Content)
+			}
 			return result, err
 		}
 		message, err := runtime.Stream(ctx)
 		if err != nil {
+			if errors.Is(err, ErrRunBudgetExceeded) {
+				delta := budgetExceededFinalMessage(err)
+				if strings.TrimSpace(result.Content) == "" {
+					result.Content = delta
+				} else {
+					delta = "\n\n" + budgetExceededFinalMessage(err)
+					result.Content += delta
+				}
+				result.Trace = append(result.Trace, budgetExceededTrace(err))
+				return emitBudgetExceededDone(emit, result, delta)
+			}
 			return result, err
 		}
 		if message == nil {
@@ -246,6 +282,68 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 		}
 		return result, nil
 	}
+}
+
+func budgetExceededFinalMessage(err error) string {
+	var budgetErr RunBudgetError
+	if errors.As(err, &budgetErr) {
+		switch {
+		case budgetErr.Kind == "tool" && budgetErr.Tool == tool.AgentToolWebFetch:
+			return fmt.Sprintf("这轮没有 fetch 到更多有效网页信息，`web_fetch` 已达到本轮上限（%d 次）。\n\n我已经停止继续抓取，避免一直等待。可以换一个更具体的网址或问题继续查。", budgetErr.Limit)
+		case budgetErr.Kind == "tool":
+			return fmt.Sprintf("这轮工具调用已经达到上限（%d 次），我已停止继续调用工具。\n\n目前没有拿到足够的新证据继续推进，请缩小问题范围后再试。", budgetErr.Limit)
+		case budgetErr.Kind == "model":
+			return fmt.Sprintf("这轮模型调用已经达到上限（%d 次），我已停止继续运行。\n\n当前没有足够稳定的结果可继续展开，请缩小问题范围后再试。", budgetErr.Limit)
+		}
+	}
+	return "这轮运行预算已经耗尽，我已停止继续调用模型或工具，避免单轮交互继续拉长。请缩小问题范围后再试。"
+}
+
+func budgetExceededToolContent(err error) string {
+	var budgetErr RunBudgetError
+	if errors.As(err, &budgetErr) {
+		switch {
+		case budgetErr.Kind == "tool" && budgetErr.Tool == tool.AgentToolWebFetch:
+			return fmt.Sprintf("没有 fetch 到更多有效网页信息：web_fetch 已达到本轮上限（%d 次）。请停止继续抓取网页，基于已经拿到的可用证据回答；如果已有网页结果不可用，请明确告诉用户没有 fetch 到有效信息。", budgetErr.Limit)
+		case budgetErr.Kind == "tool":
+			return fmt.Sprintf("工具调用已达到本轮上限（%d 次）。请停止继续调用工具，基于已有证据回答，并明确说明哪些信息没有验证。", budgetErr.Limit)
+		case budgetErr.Kind == "model":
+			return fmt.Sprintf("模型调用已达到本轮上限（%d 次）。请基于已有证据给出简短结论，并明确说明哪些信息没有验证。", budgetErr.Limit)
+		}
+	}
+	return "本轮运行预算已耗尽。请停止继续调用工具，基于已有证据回答，并明确说明哪些信息没有验证。"
+}
+
+func budgetExceededTrace(err error) AgentTraceItem {
+	return AgentTraceItem{
+		Type:    "budget",
+		Title:   "Run budget",
+		Content: budgetExceededToolContent(err),
+	}
+}
+
+func emitBudgetExceededDone(emit func(AgentStreamEvent) error, result AgentRunResult, delta string) (AgentRunResult, error) {
+	if emit == nil {
+		return result, nil
+	}
+	if strings.TrimSpace(delta) != "" {
+		if err := emit(AgentStreamEvent{
+			Type:    "content_delta",
+			Delta:   delta,
+			Content: result.Content,
+		}); err != nil {
+			return result, err
+		}
+	}
+	if err := emit(AgentStreamEvent{
+		Type:       "done",
+		Content:    result.Content,
+		Trace:      result.Trace,
+		RawContent: result.RawContent,
+	}); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func (a *Agent) toolsForRun(runCtx *RunContext) []einotool.BaseTool {

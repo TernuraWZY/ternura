@@ -62,10 +62,12 @@ type RunContext struct {
 	ToolCallCount  int
 	Metadata       map[string]any
 
-	contextBlocks []RuntimeContextBlock
-	disabledTools map[tool.AgentTool]string
-	toolResults   []ToolExecution
-	toolPolicy    ToolPolicy
+	contextBlocks  []RuntimeContextBlock
+	disabledTools  map[tool.AgentTool]string
+	toolResults    []ToolExecution
+	toolPolicy     ToolPolicy
+	runLimits      RunLimits
+	toolCallCounts map[tool.AgentTool]int
 }
 
 func NewRunContext(query string, mode RunMode) *RunContext {
@@ -75,6 +77,127 @@ func NewRunContext(query string, mode RunMode) *RunContext {
 		Metadata:      make(map[string]any),
 		disabledTools: make(map[tool.AgentTool]string),
 	}
+}
+
+func (r *RunContext) SetRunLimits(limits RunLimits) {
+	if r == nil {
+		return
+	}
+	r.runLimits = normalizeRunLimits(limits)
+	if r.toolCallCounts == nil {
+		r.toolCallCounts = make(map[tool.AgentTool]int)
+	}
+}
+
+func (r *RunContext) RunLimits() RunLimits {
+	if r == nil {
+		return RunLimits{}
+	}
+	return r.runLimits
+}
+
+func (r *RunContext) reserveModelCall() error {
+	if r == nil {
+		return nil
+	}
+	limit := r.runLimits.MaxModelCalls
+	if limit > 0 && r.ModelCallCount >= limit {
+		return RunBudgetError{Kind: "model", Limit: limit}
+	}
+	r.ModelCallCount++
+	return nil
+}
+
+func (r *RunContext) reserveToolCall(name tool.AgentTool) error {
+	if r == nil {
+		return nil
+	}
+	if r.toolCallCounts == nil {
+		r.toolCallCounts = make(map[tool.AgentTool]int)
+	}
+	if limit := r.runLimits.MaxToolCalls; limit > 0 && r.ToolCallCount >= limit {
+		return RunBudgetError{Kind: "tool", Limit: limit}
+	}
+	if limit := r.runLimits.MaxToolCallsByName[name]; limit > 0 && r.toolCallCounts[name] >= limit {
+		return RunBudgetError{Kind: "tool", Tool: name, Limit: limit}
+	}
+	r.ToolCallCount++
+	r.toolCallCounts[name]++
+	return nil
+}
+
+func (r *RunContext) CanCallModel() bool {
+	if r == nil {
+		return true
+	}
+	limit := r.runLimits.MaxModelCalls
+	return limit <= 0 || r.ModelCallCount < limit
+}
+
+func (r *RunContext) CanCallTool(name tool.AgentTool) bool {
+	if r == nil {
+		return true
+	}
+	if limit := r.runLimits.MaxToolCalls; limit > 0 && r.ToolCallCount >= limit {
+		return false
+	}
+	if limit := r.runLimits.MaxToolCallsByName[name]; limit > 0 && r.toolCallCounts[name] >= limit {
+		return false
+	}
+	return true
+}
+
+func (r *RunContext) CanCallAnyTool(names ...tool.AgentTool) bool {
+	if r == nil {
+		return true
+	}
+	if limit := r.runLimits.MaxToolCalls; limit > 0 && r.ToolCallCount >= limit {
+		return false
+	}
+	if len(names) == 0 {
+		return true
+	}
+	for _, name := range names {
+		if r.CanCallTool(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *RunContext) ToolCallCountFor(name tool.AgentTool) int {
+	if r == nil || r.toolCallCounts == nil {
+		return 0
+	}
+	return r.toolCallCounts[name]
+}
+
+func (r *RunContext) BudgetContextText() string {
+	if r == nil {
+		return ""
+	}
+	limits := r.runLimits
+	parts := []string{
+		"This run has a bounded execution budget. Prefer direct progress over broad exploration.",
+		formatBudgetLine("Model calls", r.ModelCallCount, limits.MaxModelCalls),
+		formatBudgetLine("Tool calls", r.ToolCallCount, limits.MaxToolCalls),
+	}
+	if limit := limits.MaxToolCallsByName[tool.AgentToolWebFetch]; limit > 0 {
+		parts = append(parts, formatBudgetLine("web_fetch calls", r.ToolCallCountFor(tool.AgentToolWebFetch), limit))
+	}
+	parts = append(parts, "If a tool returns a budget-exceeded message, stop calling tools and answer with the evidence already available. Clearly say what was not verified.")
+	return strings.Join(parts, "\n")
+}
+
+func formatBudgetLine(label string, used int, limit int) string {
+	if limit <= 0 {
+		return fmt.Sprintf("- %s used: %d.", label, used)
+	}
+	remaining := limit - used
+	if remaining < 0 {
+		remaining = 0
+	}
+	return fmt.Sprintf("- %s used: %d/%d; remaining: %d.", label, used, limit, remaining)
 }
 
 // SetToolPolicy 写入本轮模型调用的工具使用策略。
