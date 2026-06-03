@@ -320,6 +320,62 @@ func TestProcessSkipsProcessingReactionWhenHandlerIsFast(t *testing.T) {
 	}
 }
 
+func TestProcessSendsFailureReplyAfterAgentTimeout(t *testing.T) {
+	var mu sync.Mutex
+	sent := make([]sentRequest, 0, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"code":                0,
+				"tenant_access_token": "tenant-token",
+				"expire":              3600,
+			})
+		case "/open-apis/im/v1/messages/om_timeout/reply":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read body: %v", err)
+			}
+			mu.Lock()
+			sent = append(sent, sentRequest{path: r.URL.Path, body: string(body)})
+			mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := NewService(Config{
+		Enabled:            true,
+		AppID:              "cli_xxx",
+		AppSecret:          "secret",
+		BaseURL:            server.URL,
+		ReplyToMessage:     true,
+		ProcessingReaction: false,
+		AgentTurnTimeout:   10 * time.Millisecond,
+		ReplyTimeout:       time.Second,
+	}, func(ctx context.Context, msg InboundMessage) (Reply, error) {
+		<-ctx.Done()
+		return Reply{}, ctx.Err()
+	})
+
+	service.process(context.Background(), InboundMessage{
+		MessageID:     "om_timeout",
+		ReceiveIDType: "chat_id",
+		ReceiveID:     "oc_group",
+	})
+
+	waitForSentMessages(t, &mu, &sent, 1)
+	if sent[0].path != "/open-apis/im/v1/messages/om_timeout/reply" {
+		t.Fatalf("timeout should still send a reply, got %s", sent[0].path)
+	}
+	if !strings.Contains(sent[0].body, "处理超过了") {
+		t.Fatalf("timeout reply should be user-facing, got %s", sent[0].body)
+	}
+}
+
 func waitForSentMessages(t *testing.T, mu *sync.Mutex, sent *[]sentRequest, count int) {
 	t.Helper()
 	deadline := time.After(time.Second)

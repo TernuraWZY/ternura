@@ -41,8 +41,8 @@ func NewMiniMaxModelConfig() ModelConfig {
 	return ModelConfig{
 		BaseURL:       getEnvDefault("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1"),
 		ApiKey:        getEnvDefault("MINIMAX_API_KEY", ""),
-		Model:         getEnvDefault("MINIMAX_MODEL", "MiniMax-M2.7"),
-		ContextWindow: 204800,
+		Model:         getEnvDefault("MINIMAX_MODEL", "MiniMax-M3"),
+		ContextWindow: 1000000,
 	}
 }
 

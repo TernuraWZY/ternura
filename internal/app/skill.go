@@ -23,14 +23,14 @@ func newAgentFromSkillRegistry(modelConf config.ModelConfig, registry *agent.Ski
 	)
 }
 
-func newCLISkillRegistry(modelConf config.ModelConfig, cronTool *tool.CronTool) *agent.SkillRegistry {
+func newCLISkillRegistry(cronTool *tool.CronTool) *agent.SkillRegistry {
 	registry := agent.NewSkillRegistry(loadOpenClawCompatibleSkills()...)
 	registry.Register(
 		newWorkspaceSkill(nil),
 		newCLIMemorySkill(),
 		newScheduleSkill(cronTool, nil),
 		newWebSkill(),
-		newGroundingSkill(newEinoToolGroundingVerifier(modelConf)),
+		newGroundingSkill(),
 	)
 	return registry
 }
@@ -49,7 +49,7 @@ func (s *agentServer) newSkillRegistry(sessionID string, cronTool *tool.CronTool
 		s.newMemorySkill(sessionIDFunc),
 		newScheduleSkill(cronTool, s.cron),
 		newWebSkill(),
-		newGroundingSkill(s.toolGrounding),
+		newGroundingSkill(),
 	)
 	return registry
 }
@@ -161,15 +161,15 @@ func newWebSkill() agent.Skill {
 	})
 }
 
-func newGroundingSkill(verifier toolGroundingVerifier) agent.Skill {
+func newGroundingSkill() agent.Skill {
 	return agent.NewStaticSkill(agent.SkillConfig{
 		Name:        "grounding",
-		Description: "Prevent final answers from presenting unverified tool, command, web, file, memory, or local-environment claims as facts.",
+		Description: "Prevent final answers from presenting fake tool calls or unverified side effects as facts.",
 		Instructions: strings.Join([]string{
-			"- Treat current-run tool results as evidence; conversation history and memory are context, not proof of external facts or side effects.",
-			"- Never report command output, installation status, fetched/search results, file changes, memory changes, or other current facts unless this run has matching tool evidence.",
-			"- If you have not called a tool, either call the appropriate tool or clearly say that you have not verified the claim.",
+			"- Treat current-run tool results as evidence for side effects such as command execution, file writes, memory changes, and scheduled jobs.",
+			"- Do not print raw tool-call markup as if it executed.",
+			"- If a real side effect was not performed in this run, say so plainly instead of presenting it as done.",
 		}, "\n"),
-		Hooks: []agent.Hook{newToolGroundingGuardHook(verifier)},
+		Hooks: []agent.Hook{newToolGroundingGuardHook()},
 	})
 }

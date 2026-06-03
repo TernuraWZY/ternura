@@ -164,7 +164,6 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 			runErr = err
 		}
 	}()
-
 	a.messages = append(a.messages, schema.UserMessage(query))
 	if err := a.hooks.AfterUserMessage(ctx, runCtx); err != nil {
 		return result, err
@@ -222,7 +221,6 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 			runErr = err
 		}
 	}()
-
 	a.messages = append(a.messages, schema.UserMessage(query))
 	if err := a.hooks.AfterUserMessage(ctx, runCtx); err != nil {
 		return result, err

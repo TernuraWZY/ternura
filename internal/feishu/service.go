@@ -25,7 +25,8 @@ const (
 	defaultMaxEventSize       = 1 << 20
 	defaultProcessingReaction = "OneSecond"
 	defaultProcessingDelay    = time.Second
-	defaultAgentTurnTimeout   = 2 * time.Minute
+	defaultAgentTurnTimeout   = 4 * time.Minute
+	defaultReplyTimeout       = 15 * time.Second
 )
 
 type Config struct {
@@ -43,6 +44,7 @@ type Config struct {
 	ProcessingReactionType string
 	ProcessingDelay        time.Duration
 	AgentTurnTimeout       time.Duration
+	ReplyTimeout           time.Duration
 	AllowOpenIDs           []string
 	HTTPClient             *http.Client
 }
@@ -115,6 +117,7 @@ func NewConfigFromEnv() Config {
 		ProcessingReactionType: envDefault("FEISHU_PROCESSING_REACTION_TYPE", defaultProcessingReaction),
 		ProcessingDelay:        envDuration("FEISHU_PROCESSING_DELAY", defaultProcessingDelay),
 		AgentTurnTimeout:       envDuration("TERNURA_AGENT_TURN_TIMEOUT", defaultAgentTurnTimeout),
+		ReplyTimeout:           envDuration("FEISHU_REPLY_TIMEOUT", defaultReplyTimeout),
 		AllowOpenIDs:           splitCSV(os.Getenv("FEISHU_ALLOW_OPEN_IDS")),
 	}
 }
@@ -128,6 +131,9 @@ func NewService(cfg Config, handle HandlerFunc) *Service {
 	}
 	if cfg.AgentTurnTimeout <= 0 {
 		cfg.AgentTurnTimeout = defaultAgentTurnTimeout
+	}
+	if cfg.ReplyTimeout <= 0 {
+		cfg.ReplyTimeout = defaultReplyTimeout
 	}
 	return &Service{
 		cfg:    cfg,
@@ -197,19 +203,21 @@ func (s *Service) process(ctx context.Context, inbound InboundMessage) {
 	if s.handle == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.AgentTurnTimeout)
+	turnCtx, cancel := context.WithTimeout(ctx, s.cfg.AgentTurnTimeout)
 	defer cancel()
 
-	replyMessage, err := s.handleWithProcessingReaction(ctx, inbound)
+	replyMessage, err := s.handleWithProcessingReaction(turnCtx, inbound)
 	if err != nil {
 		log.Printf("feishu agent turn failed for %s: %v", inbound.MessageID, err)
-		replyMessage = Reply{Content: "处理失败：" + err.Error()}
+		replyMessage = Reply{Content: s.failureReplyContent(err)}
 	}
 	if replyMessage.Empty() {
 		return
 	}
 
-	if err := s.Send(ctx, OutboundMessage{
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), s.cfg.ReplyTimeout)
+	defer sendCancel()
+	if err := s.Send(sendCtx, OutboundMessage{
 		ReceiveIDType: inbound.ReceiveIDType,
 		ReceiveID:     inbound.ReceiveID,
 		MessageID:     inbound.MessageID,
@@ -220,6 +228,13 @@ func (s *Service) process(ctx context.Context, inbound InboundMessage) {
 	}); err != nil {
 		log.Printf("feishu send reply failed for %s: %v", inbound.MessageID, err)
 	}
+}
+
+func (s *Service) failureReplyContent(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Sprintf("这轮处理超过了 %s，我先停止继续等待。\n\n我已经收到你的消息，但模型或工具调用耗时太久。你可以把问题拆小一点再发，或者稍后重试。", s.cfg.AgentTurnTimeout)
+	}
+	return "处理失败：" + err.Error()
 }
 
 type handlerResult struct {
