@@ -72,6 +72,15 @@ func TestRunWithTraceUsesEinoReactToolLoop(t *testing.T) {
 	if len(result.Trace) != 1 || result.Trace[0].Title != "Tool use: fake_tool" {
 		t.Fatalf("trace = %+v", result.Trace)
 	}
+	if len(result.ModelInput) != 2 {
+		t.Fatalf("model input snapshots = %d, want 2: %+v", len(result.ModelInput), result.ModelInput)
+	}
+	if result.ModelInput[0].Call != 1 || !modelInputContainsRoleContent(result.ModelInput[0], "user", "use the fake tool") {
+		t.Fatalf("first model input snapshot = %+v", result.ModelInput[0])
+	}
+	if result.ModelInput[1].Call != 2 || !modelInputContainsToolMessage(result.ModelInput[1], "call-1", "tool ok") {
+		t.Fatalf("second model input snapshot = %+v", result.ModelInput[1])
+	}
 	if !containsToolMessage(agent.messages, "call-1", "tool ok") {
 		t.Fatalf("conversation history does not contain Eino tool message: %+v", agent.messages)
 	}
@@ -320,6 +329,24 @@ func containsToolMessage(messages []*schema.Message, callID string, content stri
 func containsSystemContent(messages []*schema.Message, content string) bool {
 	for _, message := range messages {
 		if message.Role == schema.System && strings.Contains(message.Content, content) {
+			return true
+		}
+	}
+	return false
+}
+
+func modelInputContainsRoleContent(snapshot ModelInputSnapshot, role string, content string) bool {
+	for _, message := range snapshot.Messages {
+		if message.Role == role && strings.Contains(message.Content, content) {
+			return true
+		}
+	}
+	return false
+}
+
+func modelInputContainsToolMessage(snapshot ModelInputSnapshot, callID string, content string) bool {
+	for _, message := range snapshot.Messages {
+		if message.Role == "tool" && message.ToolCallID == callID && strings.Contains(message.Content, content) {
 			return true
 		}
 	}

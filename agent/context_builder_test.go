@@ -98,14 +98,41 @@ func TestContextBuilderBuildDropsHistoricalToolExchangeBeforeLatestUser(t *testi
 	if containsToolMessage(messages, "old-call", "old huge output") {
 		t.Fatalf("historical tool result should be dropped: %+v", messages)
 	}
-	if !containsAssistantContent(messages, "old final answer") {
-		t.Fatalf("historical final assistant answer should be kept: %+v", messages)
+	if containsAssistantContent(messages, "old final answer") {
+		t.Fatalf("historical final assistant answer should be dropped: %+v", messages)
 	}
 	if !hasAssistantToolCall(messages, "current-call") {
 		t.Fatalf("current run assistant tool call should be kept: %+v", messages)
 	}
 	if !containsToolMessage(messages, "current-call", "current output") {
 		t.Fatalf("current run tool result should be kept: %+v", messages)
+	}
+}
+
+func TestContextBuilderBuildDropsHistoricalAssistantMessages(t *testing.T) {
+	input := []*schema.Message{
+		schema.SystemMessage("system"),
+		schema.UserMessage("old question"),
+		schema.AssistantMessage("<think>secret reasoning</think>\nold clean answer", nil),
+		schema.UserMessage("older repair case"),
+		schema.AssistantMessage("我拦截了这次回复：没有本轮工具证据支撑。", nil),
+		schema.UserMessage("current question"),
+	}
+	builder := NewContextBuilder("system")
+
+	messages, err := builder.Build(context.Background(), nil, input)
+
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	if containsAssistantContent(messages, "old clean answer") {
+		t.Fatalf("historical assistant answer should not be reused as model context: %+v", messages)
+	}
+	if containsAssistantContentSubstring(messages, "<think>") || containsAssistantContentSubstring(messages, "secret reasoning") {
+		t.Fatalf("historical think content should be stripped: %+v", messages)
+	}
+	if containsAssistantContentSubstring(messages, "我拦截了这次回复") {
+		t.Fatalf("historical guard/repair assistant content should be omitted: %+v", messages)
 	}
 }
 
@@ -190,6 +217,15 @@ func containsAssistantContent(messages []*schema.Message, content string) bool {
 func containsAssistantContentPrefix(messages []*schema.Message, content string) bool {
 	for _, message := range messages {
 		if message != nil && message.Role == schema.Assistant && strings.HasPrefix(message.Content, content) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAssistantContentSubstring(messages []*schema.Message, content string) bool {
+	for _, message := range messages {
+		if message != nil && message.Role == schema.Assistant && strings.Contains(message.Content, content) {
 			return true
 		}
 	}

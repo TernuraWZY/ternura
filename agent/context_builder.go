@@ -35,6 +35,7 @@ func (b *ContextBuilder) Build(_ context.Context, runCtx *RunContext, input []*s
 		return messages, nil
 	}
 	messages = pruneHistoricalToolExchange(messages)
+	messages = sanitizeHistoricalAssistantMessages(messages)
 
 	runtimeContext := ""
 	if runCtx != nil {
@@ -166,6 +167,21 @@ func pruneHistoricalToolExchange(messages []*schema.Message) []*schema.Message {
 		pruned = append(pruned, message)
 	}
 	return pruned
+}
+
+func sanitizeHistoricalAssistantMessages(messages []*schema.Message) []*schema.Message {
+	lastUserIndex := latestUserMessageIndex(messages)
+	if lastUserIndex <= 0 {
+		return messages
+	}
+	sanitized := make([]*schema.Message, 0, len(messages))
+	for idx, message := range messages {
+		if message == nil || idx >= lastUserIndex || message.Role != schema.Assistant {
+			sanitized = append(sanitized, message)
+			continue
+		}
+	}
+	return sanitized
 }
 
 func latestUserMessageIndex(messages []*schema.Message) int {

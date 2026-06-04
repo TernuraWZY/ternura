@@ -113,6 +113,40 @@ func TestMemoryStoreShortTermMemoryRollsBySession(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreShortTermMemorySanitizesAssistantNoise(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+
+	if err := store.AppendShortTermTurn("session-test", "hello", agent.AgentRunResult{
+		Content: "<think>secret</think>\nclean answer",
+	}); err != nil {
+		t.Fatalf("append clean turn: %v", err)
+	}
+	if err := store.AppendShortTermTurn("session-test", "guard", agent.AgentRunResult{
+		Content: "我拦截了这次回复：没有本轮工具证据支撑。",
+	}); err != nil {
+		t.Fatalf("append guard turn: %v", err)
+	}
+
+	detail, err := store.Detail("session-test")
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if len(detail.ShortTerm.Turns) != 2 {
+		t.Fatalf("short-term turns = %+v", detail.ShortTerm.Turns)
+	}
+	if detail.ShortTerm.Turns[0].Assistant != "clean answer" {
+		t.Fatalf("assistant turn should strip think content: %+v", detail.ShortTerm.Turns[0])
+	}
+	if detail.ShortTerm.Turns[1].Assistant != "" {
+		t.Fatalf("guard assistant should be omitted from short-term memory: %+v", detail.ShortTerm.Turns[1])
+	}
+	for _, blocked := range []string{"<think>", "secret", "我拦截了这次回复"} {
+		if strings.Contains(detail.ShortTerm.Summary, blocked) {
+			t.Fatalf("summary should not contain blocked content %q:\n%s", blocked, detail.ShortTerm.Summary)
+		}
+	}
+}
+
 func TestMemoryStoreSelectsRelevantLongTermMemoriesForContext(t *testing.T) {
 	store := newMemoryStore(t.TempDir())
 	store.longTermContextLimit = 2
@@ -241,6 +275,63 @@ func TestMemoryStoreActiveRecallDoesNotUseRecentTurnsForNewTopic(t *testing.T) {
 	}
 	if strings.Contains(recall.SearchQuery, "kubernetes deployment") {
 		t.Fatalf("new-topic search query should not include previous user turn: %q", recall.SearchQuery)
+	}
+}
+
+func TestMemoryStoreActiveRecallDoesNotUseAssistantTextAsSearchEvidence(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	if err := store.AppendShortTermTurn("session-test", "闲聊一下", agent.AgentRunResult{
+		Content: "用户已经优化了 harness，包括系统提示和工具配置。",
+	}); err != nil {
+		t.Fatalf("append short-term turn: %v", err)
+	}
+
+	recall, err := store.ActiveRecallForQuery("session-test", "你看一下优化了啥")
+	if err != nil {
+		t.Fatalf("active recall: %v", err)
+	}
+
+	if recall.Status != "no_relevant_memory" {
+		t.Fatalf("assistant-only evidence should not be recalled, got %+v", recall)
+	}
+	if strings.Contains(recall.Summary, "harness") || strings.Contains(recall.RawSummary, "harness") {
+		t.Fatalf("assistant text leaked into recall: %+v", recall)
+	}
+}
+
+func TestMemoryStoreActiveRecallDoesNotInjectToolMemoryForCurrentStateQuery(t *testing.T) {
+	store := newMemoryStore(t.TempDir())
+	result := agent.ToolResult{
+		Call: schema.ToolCall{
+			ID: "call-old-path",
+			Function: schema.FunctionCall{
+				Name:      string(tool.AgentToolBash),
+				Arguments: `{"command":"ls -la ~/.openclaw/workspace"}`,
+			},
+		},
+		Content: "old output from ~/.openclaw/workspace",
+	}
+	record, ok, err := store.CaptureToolMemory(context.Background(), "session-test", result)
+	if err != nil {
+		t.Fatalf("capture tool memory: %v", err)
+	}
+	if !ok {
+		t.Fatal("tool memory should be captured")
+	}
+	if err := store.AppendToolMemories("session-test", []toolMemoryRecord{record}); err != nil {
+		t.Fatalf("append tool memory: %v", err)
+	}
+
+	recall, err := store.ActiveRecallForQuery("session-test", "你现在当前路径是啥")
+	if err != nil {
+		t.Fatalf("active recall: %v", err)
+	}
+
+	if recall.Status != "no_relevant_memory" {
+		t.Fatalf("current-state query should not inject old tool memory: %+v", recall)
+	}
+	if strings.Contains(recall.Summary, "openclaw") || strings.Contains(recall.RawSummary, "openclaw") {
+		t.Fatalf("old tool memory leaked into current-state recall: %+v", recall)
 	}
 }
 
@@ -639,7 +730,7 @@ func TestToolMemoryHookDefersSummaryUntilRunFinishes(t *testing.T) {
 	if err := hook.AfterToolCall(context.Background(), run, &result); err != nil {
 		t.Fatalf("after tool call: %v", err)
 	}
-	before, err := store.RuntimeContextForQuery("session-test", "context_builder.go")
+	before, err := store.RuntimeContextForQuery("session-test", "context_builder.go 的工具结果")
 	if err != nil {
 		t.Fatalf("runtime context before run finish: %v", err)
 	}
@@ -650,7 +741,7 @@ func TestToolMemoryHookDefersSummaryUntilRunFinishes(t *testing.T) {
 	if err := hook.AfterRun(context.Background(), run, agent.AgentRunResult{Content: "done"}, nil); err != nil {
 		t.Fatalf("after run: %v", err)
 	}
-	after, err := store.RuntimeContextForQuery("session-test", "context_builder.go")
+	after, err := store.RuntimeContextForQuery("session-test", "context_builder.go 的工具结果")
 	if err != nil {
 		t.Fatalf("runtime context after run finish: %v", err)
 	}

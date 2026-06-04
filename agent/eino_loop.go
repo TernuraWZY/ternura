@@ -163,7 +163,58 @@ func (r *einoAgentRun) buildModelMessages(ctx context.Context, input []*schema.M
 	if builder == nil {
 		builder = NewContextBuilder(r.agent.systemPrompt)
 	}
-	return builder.Build(ctx, r.runCtx, input)
+	messages, err := builder.Build(ctx, r.runCtx, input)
+	if err != nil {
+		return nil, err
+	}
+	r.recordModelInput(messages)
+	return messages, nil
+}
+
+func (r *einoAgentRun) recordModelInput(messages []*schema.Message) {
+	if r == nil || r.result == nil {
+		return
+	}
+	call := 0
+	if r.runCtx != nil {
+		call = r.runCtx.ModelCallCount
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snapshot := NewModelInputSnapshot(call, messages)
+	if len(r.result.ModelInput) > 0 && sameModelInputSnapshot(r.result.ModelInput[len(r.result.ModelInput)-1], snapshot) {
+		return
+	}
+	r.result.ModelInput = append(r.result.ModelInput, snapshot)
+}
+
+func sameModelInputSnapshot(left, right ModelInputSnapshot) bool {
+	if left.Call != right.Call || left.TotalRunes != right.TotalRunes || len(left.Messages) != len(right.Messages) {
+		return false
+	}
+	for idx := range left.Messages {
+		if !sameModelInputMessage(left.Messages[idx], right.Messages[idx]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameModelInputMessage(left, right ModelInputMessage) bool {
+	if left.Role != right.Role ||
+		left.Content != right.Content ||
+		left.ToolName != right.ToolName ||
+		left.ToolCallID != right.ToolCallID ||
+		left.Truncated != right.Truncated ||
+		len(left.ToolCalls) != len(right.ToolCalls) {
+		return false
+	}
+	for idx := range left.ToolCalls {
+		if left.ToolCalls[idx] != right.ToolCalls[idx] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *einoAgentRun) beforeModelCall(ctx context.Context) error {

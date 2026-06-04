@@ -41,17 +41,18 @@ const (
 )
 
 type persistedRun struct {
-	RunID       string                 `json:"run_id"`
-	Status      string                 `json:"status"`
-	UserMessage string                 `json:"user_message"`
-	TriggerKind string                 `json:"trigger_kind,omitempty"`
-	Content     string                 `json:"content,omitempty"`
-	Trace       []agent.AgentTraceItem `json:"trace,omitempty"`
-	RawContent  string                 `json:"raw_content,omitempty"`
-	Error       string                 `json:"error,omitempty"`
-	StartedAt   string                 `json:"started_at,omitempty"`
-	FinishedAt  string                 `json:"finished_at,omitempty"`
-	DurationMS  int64                  `json:"duration_ms,omitempty"`
+	RunID       string                     `json:"run_id"`
+	Status      string                     `json:"status"`
+	UserMessage string                     `json:"user_message"`
+	TriggerKind string                     `json:"trigger_kind,omitempty"`
+	Content     string                     `json:"content,omitempty"`
+	Trace       []agent.AgentTraceItem     `json:"trace,omitempty"`
+	RawContent  string                     `json:"raw_content,omitempty"`
+	ModelInput  []agent.ModelInputSnapshot `json:"model_input,omitempty"`
+	Error       string                     `json:"error,omitempty"`
+	StartedAt   string                     `json:"started_at,omitempty"`
+	FinishedAt  string                     `json:"finished_at,omitempty"`
+	DurationMS  int64                      `json:"duration_ms,omitempty"`
 }
 
 type persistedTodo struct {
@@ -148,6 +149,9 @@ func (s *sessionStore) Load() error {
 	splitSnapshot, err := s.loadSplitLocked()
 	if err == nil {
 		s.snapshot = normalizeSnapshot(splitSnapshot)
+		if s.markInterruptedRunsLocked(time.Now()) {
+			return s.saveLocked()
+		}
 		return nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
@@ -170,6 +174,7 @@ func (s *sessionStore) Load() error {
 		return err
 	}
 	s.snapshot = normalizeSnapshot(snapshot)
+	s.markInterruptedRunsLocked(time.Now())
 	if err := s.saveLocked(); err != nil {
 		return err
 	}
@@ -177,6 +182,29 @@ func (s *sessionStore) Load() error {
 		return err
 	}
 	return nil
+}
+
+func (s *sessionStore) markInterruptedRunsLocked(now time.Time) bool {
+	changed := false
+	finishedAt := now.Format(time.RFC3339Nano)
+	for sessionIdx := range s.snapshot.Sessions {
+		session := &s.snapshot.Sessions[sessionIdx]
+		for runIdx := range session.Runs {
+			run := &session.Runs[runIdx]
+			if run.Status != runStatusRunning {
+				continue
+			}
+			run.Status = runStatusFailed
+			run.Error = "interrupted while the server was stopped"
+			run.FinishedAt = finishedAt
+			if startedAt, err := time.Parse(time.RFC3339Nano, run.StartedAt); err == nil {
+				run.DurationMS = durationMillis(startedAt, now)
+			}
+			session.UpdatedAt = finishedAt
+			changed = true
+		}
+	}
+	return changed
 }
 
 func (s *sessionStore) StartRun(run runLifecycle, userMessage string) error {
@@ -258,6 +286,7 @@ func (s *sessionStore) finishRunLocked(sessionID string, run runLifecycle, displ
 		Content:     result.Content,
 		Trace:       result.Trace,
 		RawContent:  result.RawContent,
+		ModelInput:  result.ModelInput,
 		StartedAt:   run.StartedAt.Format(time.RFC3339Nano),
 		FinishedAt:  finishedAt.Format(time.RFC3339Nano),
 		DurationMS:  durationMillis(run.StartedAt, finishedAt),
@@ -268,10 +297,11 @@ func (s *sessionStore) finishRunLocked(sessionID string, run runLifecycle, displ
 
 	upsertRun(session, item)
 	if status == runStatusSucceeded && result.Content != "" && strings.TrimSpace(runtimeMessage) != "" {
-		session.Messages = append(session.Messages,
-			persistedMessage{Role: "user", Content: runtimeMessage},
-			persistedMessage{Role: "assistant", Content: result.Content},
-		)
+		session.Messages = append(session.Messages, persistedMessage{Role: "user", Content: runtimeMessage})
+		assistantMessage := agent.CleanAssistantContentForHistory(result.Content)
+		if !agent.ShouldOmitAssistantFromHistory(assistantMessage) {
+			session.Messages = append(session.Messages, persistedMessage{Role: "assistant", Content: assistantMessage})
+		}
 	}
 	return s.saveLocked()
 }

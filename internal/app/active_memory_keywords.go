@@ -109,9 +109,6 @@ func renderActiveMemoryKeywordPrompt(input activeMemoryKeywordInput) string {
 			if turn.User != "" {
 				lines = append(lines, "- User: "+turn.User)
 			}
-			if turn.Assistant != "" {
-				lines = append(lines, "- Assistant: "+turn.Assistant)
-			}
 		}
 	}
 	if strings.TrimSpace(input.RecallQuery) != "" {

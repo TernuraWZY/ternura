@@ -248,7 +248,7 @@ func (s *agentServer) newAgentForSessionWithCron(sessionID string, cronTool *too
 
 	snapshot := s.store.Snapshot()
 	if session := findSession(snapshot.Sessions, sessionID); session != nil && len(session.Messages) > 0 {
-		restoreAgentConversation(sessionAgent, session.Messages)
+		_ = restoreAgentConversation(sessionAgent, session.Messages)
 	}
 	return sessionAgent
 }

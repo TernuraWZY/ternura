@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -164,17 +165,39 @@ func (s *agentServer) resetAgentFromSnapshot(snapshot sessionSnapshot) {
 	if !ok || len(session.Messages) == 0 {
 		return
 	}
-	restoreAgentConversation(s.agent, session.Messages)
-	log.Printf("restored %d persisted conversation messages from %s", len(session.Messages), session.SessionID)
+	restored := restoreAgentConversation(s.agent, session.Messages)
+	log.Printf("restored %d/%d persisted conversation messages from %s", restored, len(session.Messages), session.SessionID)
 }
 
-func restoreAgentConversation(agentInstance *agent.Agent, persisted []persistedMessage) {
+func restoreAgentConversation(agentInstance *agent.Agent, persisted []persistedMessage) int {
+	messages := cleanConversationForRestore(persisted, maxRestoredConversationMessages)
+	agentInstance.RestoreConversation(messages)
+	return len(messages)
+}
+
+const maxRestoredConversationMessages = 12
+
+func cleanConversationForRestore(persisted []persistedMessage, maxMessages int) []agent.ConversationMessage {
 	messages := make([]agent.ConversationMessage, 0, len(persisted))
 	for _, message := range persisted {
+		role := strings.TrimSpace(message.Role)
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+		if role == "assistant" {
+			continue
+		}
+		if role != "user" && role != "assistant" {
+			continue
+		}
 		messages = append(messages, agent.ConversationMessage{
-			Role:    message.Role,
-			Content: message.Content,
+			Role:    role,
+			Content: content,
 		})
 	}
-	agentInstance.RestoreConversation(messages)
+	if maxMessages > 0 && len(messages) > maxMessages {
+		messages = messages[len(messages)-maxMessages:]
+	}
+	return messages
 }

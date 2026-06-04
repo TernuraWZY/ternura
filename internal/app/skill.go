@@ -104,6 +104,7 @@ func (s *agentServer) newMemorySkill(sessionID func() string) agent.Skill {
 			tool.NewForgetMemoryTool(s.forgetMemory),
 		},
 		Hooks: []agent.Hook{
+			newSessionSummaryHook(s.memory, sessionID),
 			newMemoryHook(
 				s.memory,
 				sessionID,

@@ -262,11 +262,10 @@ func (m *memoryStore) RuntimeContextForQuery(sessionID string, query string) (st
 			sections = append(sections, "Summary: "+shortTermSummary)
 		}
 		for _, turn := range shortTermTurns {
-			line := "- User: " + turn.User
-			if turn.Assistant != "" {
-				line += " | Assistant: " + turn.Assistant
+			if strings.TrimSpace(turn.User) == "" {
+				continue
 			}
-			sections = append(sections, line)
+			sections = append(sections, "- User: "+turn.User)
 		}
 	}
 	toolMemories := selectToolMemoriesForContext(shortTerm.ToolMemories, query, m.toolContextLimit)
@@ -436,7 +435,11 @@ func (m *memoryStore) AppendShortTermTurn(sessionID string, userMessage string, 
 		return nil
 	}
 	user := truncateRunes(strings.Join(strings.Fields(userMessage), " "), maxShortTermFieldRunes)
-	assistant := truncateRunes(strings.Join(strings.Fields(result.Content), " "), maxShortTermFieldRunes)
+	assistantContent := agent.CleanAssistantContentForHistory(result.Content)
+	if agent.ShouldOmitAssistantFromHistory(assistantContent) {
+		assistantContent = ""
+	}
+	assistant := truncateRunes(strings.Join(strings.Fields(assistantContent), " "), maxShortTermFieldRunes)
 	if user == "" && assistant == "" {
 		return nil
 	}
@@ -809,7 +812,7 @@ func scoreShortTermTurn(turn shortTermTurn, query string) int {
 	if query == "" {
 		return 0
 	}
-	text := strings.ToLower(strings.Join([]string{turn.User, turn.Assistant}, " "))
+	text := strings.ToLower(turn.User)
 	score := 0
 	for _, token := range keywordTokens(query) {
 		if strings.Contains(text, token) {
@@ -826,9 +829,6 @@ func buildActiveMemoryRecallQuery(query string, turns []shortTermTurn, limit int
 		for _, turn := range turns {
 			if turn.User != "" {
 				lines = append(lines, "- User: "+turn.User)
-			}
-			if turn.Assistant != "" {
-				lines = append(lines, "- Assistant: "+turn.Assistant)
 			}
 		}
 	}
@@ -859,11 +859,10 @@ func renderActiveMemorySummary(longTerm []memoryRecord, turns []shortTermTurn, t
 		}
 		sections = append(sections, "Relevant recent session context:")
 		for _, turn := range turns {
-			line := "- User: " + turn.User
-			if turn.Assistant != "" {
-				line += " | Assistant: " + turn.Assistant
+			if strings.TrimSpace(turn.User) == "" {
+				continue
 			}
-			sections = append(sections, line)
+			sections = append(sections, "- User: "+turn.User)
 		}
 	}
 	if len(tools) > 0 {
@@ -986,7 +985,7 @@ func safeArtifactNamePart(value string) string {
 }
 
 func selectToolMemoriesForContext(records []toolMemoryRecord, query string, limit int) []toolMemoryRecord {
-	if limit <= 0 || len(records) == 0 {
+	if limit <= 0 || len(records) == 0 || !looksLikeToolMemoryReference(query) {
 		return nil
 	}
 
@@ -1111,7 +1110,31 @@ func normalizeKeywordList(keywords []string, limit int) []string {
 }
 
 func looksLikeToolMemoryReference(query string) bool {
-	return looksLikeContextReference(query)
+	normalized := strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(query)), " "))
+	return containsAny(normalized,
+		"工具结果",
+		"工具记忆",
+		"历史工具",
+		"tool result",
+		"tool memory",
+		"tool_artifacts",
+		"raw_ref",
+		"raw ref",
+		"之前查",
+		"上次查",
+		"刚刚查",
+		"刚才查",
+		"之前读",
+		"上次读",
+		"刚刚读",
+		"刚才读",
+		"读取过",
+		"查过的",
+		"之前的结果",
+		"上次的结果",
+		"刚刚的结果",
+		"刚才的结果",
+	)
 }
 
 func shouldAttemptActiveMemoryRecall(query string, searchQuery string) bool {

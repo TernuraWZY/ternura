@@ -31,9 +31,10 @@ type Agent struct {
 }
 
 type AgentRunResult struct {
-	Content    string           `json:"content"`
-	Trace      []AgentTraceItem `json:"trace,omitempty"`
-	RawContent string           `json:"raw_content,omitempty"`
+	Content    string               `json:"content"`
+	Trace      []AgentTraceItem     `json:"trace,omitempty"`
+	RawContent string               `json:"raw_content,omitempty"`
+	ModelInput []ModelInputSnapshot `json:"model_input,omitempty"`
 }
 
 type AgentTraceItem struct {
@@ -42,10 +43,33 @@ type AgentTraceItem struct {
 	Content string `json:"content"`
 }
 
+type ModelInputSnapshot struct {
+	Call       int                 `json:"call"`
+	Messages   []ModelInputMessage `json:"messages"`
+	TotalRunes int                 `json:"total_runes"`
+}
+
+type ModelInputMessage struct {
+	Role       string               `json:"role"`
+	Content    string               `json:"content,omitempty"`
+	ToolName   string               `json:"tool_name,omitempty"`
+	ToolCallID string               `json:"tool_call_id,omitempty"`
+	ToolCalls  []ModelInputToolCall `json:"tool_calls,omitempty"`
+	Truncated  bool                 `json:"truncated,omitempty"`
+}
+
+type ModelInputToolCall struct {
+	ID        string `json:"id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
 type ConversationMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
+
+const modelInputSnapshotContentRunes = 4000
 
 type AgentStreamEvent struct {
 	Type       string           `json:"type"`
@@ -489,6 +513,70 @@ func stripThinkBlocks(content string) string {
 		remaining = afterStart[end+len("</think>"):]
 	}
 	return strings.TrimSpace(builder.String())
+}
+
+func CleanAssistantContentForHistory(content string) string {
+	return stripThinkBlocks(content)
+}
+
+func ShouldOmitAssistantFromHistory(content string) bool {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return true
+	}
+	lower := strings.ToLower(content)
+	noisyPhrases := []string{
+		"我拦截了这次回复",
+		"工具调用文本，但这只是普通文本",
+		"没有本轮工具证据支撑",
+		"本轮工具结果没有覆盖",
+		"<修复说明",
+		"修复说明",
+		"unsupported claim",
+		"unsupported claims",
+		"tool grounding guard",
+		"evidence verifier",
+		"repair the final answer",
+		"the user wants me to repair",
+	}
+	for _, phrase := range noisyPhrases {
+		if strings.Contains(lower, strings.ToLower(phrase)) {
+			return true
+		}
+	}
+	return false
+}
+
+func NewModelInputSnapshot(call int, messages []*schema.Message) ModelInputSnapshot {
+	snapshot := ModelInputSnapshot{
+		Call:       call,
+		Messages:   make([]ModelInputMessage, 0, len(messages)),
+		TotalRunes: messagesRunes(messages),
+	}
+	for _, message := range messages {
+		if message == nil {
+			continue
+		}
+		item := ModelInputMessage{
+			Role:       string(message.Role),
+			Content:    message.Content,
+			ToolName:   message.ToolName,
+			ToolCallID: message.ToolCallID,
+		}
+		if runeLen(item.Content) > modelInputSnapshotContentRunes {
+			item.Content = trimRunesWithNotice(item.Content, modelInputSnapshotContentRunes, "model input message")
+			item.Truncated = true
+		}
+		for _, call := range message.ToolCalls {
+			item.ToolCalls = append(item.ToolCalls, ModelInputToolCall{
+				ID:        call.ID,
+				Name:      call.Function.Name,
+				Arguments: call.Function.Arguments,
+			})
+		}
+		snapshot.Messages = append(snapshot.Messages, item)
+	}
+	return snapshot
 }
 
 func formatToolTrace(arguments string, result string, toolErr error) string {
