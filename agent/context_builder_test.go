@@ -191,6 +191,135 @@ func TestContextBuilderBuildPrunesOldConversationByBudget(t *testing.T) {
 	}
 }
 
+func TestContextBuilderMicroCompactsOlderCurrentToolResults(t *testing.T) {
+	input := []*schema.Message{
+		schema.SystemMessage("system"),
+		schema.UserMessage("current question"),
+		assistantToolCall("call-1", "read"),
+		schema.ToolMessage("old output "+strings.Repeat("A", 200), "call-1", schema.WithToolName("read")),
+		assistantToolCall("call-2", "read"),
+		schema.ToolMessage("recent output 2", "call-2", schema.WithToolName("read")),
+		assistantToolCall("call-3", "read"),
+		schema.ToolMessage("recent output 3", "call-3", schema.WithToolName("read")),
+		assistantToolCall("call-4", "read"),
+		schema.ToolMessage("recent output 4", "call-4", schema.WithToolName("read")),
+	}
+	builder := NewContextBuilder("system")
+	builder.toolResultBudgetRunes = 0
+	builder.toolResultPreviewRunes = 80
+	builder.keepRecentToolResults = 3
+
+	messages, err := builder.Build(context.Background(), nil, input)
+
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	if containsToolMessage(messages, "call-1", "old output "+strings.Repeat("A", 200)) {
+		t.Fatalf("older tool result should be compacted: %+v", messages)
+	}
+	if !containsToolContentSubstring(messages, "call-1", "[Tool result compacted:") {
+		t.Fatalf("older tool result should keep compact placeholder: %+v", messages)
+	}
+	for _, want := range []string{"recent output 2", "recent output 3", "recent output 4"} {
+		if !containsToolContentSubstring(messages, "", want) {
+			t.Fatalf("recent tool result %q should be preserved: %+v", want, messages)
+		}
+	}
+}
+
+func TestContextBuilderToolResultBudgetCompactsLargeToolOutputs(t *testing.T) {
+	input := []*schema.Message{
+		schema.SystemMessage("system"),
+		schema.UserMessage("current question"),
+		assistantToolCall("call-large-1", "bash"),
+		schema.ToolMessage("large one "+strings.Repeat("A", 200), "call-large-1", schema.WithToolName("bash")),
+		assistantToolCall("call-large-2", "bash"),
+		schema.ToolMessage("large two "+strings.Repeat("B", 200), "call-large-2", schema.WithToolName("bash")),
+	}
+	builder := NewContextBuilder("system")
+	builder.toolResultBudgetRunes = 180
+	builder.toolResultPreviewRunes = 60
+	builder.keepRecentToolResults = 1
+
+	messages, err := builder.Build(context.Background(), nil, input)
+
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	if containsToolMessage(messages, "call-large-1", "large one "+strings.Repeat("A", 200)) {
+		t.Fatalf("large older tool output should be budget compacted: %+v", messages)
+	}
+	if !containsToolContentSubstring(messages, "call-large-1", "total tool-result budget") {
+		t.Fatalf("budget compaction reason missing: %+v", messages)
+	}
+	if !containsToolContentSubstring(messages, "call-large-2", "large two") {
+		t.Fatalf("latest tool result preview should remain available: %+v", messages)
+	}
+}
+
+func TestContextBuilderSnipCompactPreservesToolUsePairAtTailBoundary(t *testing.T) {
+	input := []*schema.Message{
+		schema.SystemMessage("system"),
+		schema.UserMessage("head"),
+		schema.UserMessage("middle 1"),
+		schema.UserMessage("middle 2"),
+		assistantToolCall("tail-call", "read"),
+		schema.ToolMessage("tail output", "tail-call", schema.WithToolName("read")),
+		schema.UserMessage("latest question"),
+	}
+	builder := NewContextBuilder("system")
+	builder.maxConversationMessages = 5
+	builder.conversationBudgetRunes = 10000
+	builder.toolResultBudgetRunes = 0
+
+	messages, err := builder.Build(context.Background(), nil, input)
+
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	if containsToolMessage(messages, "tail-call", "tail output") && !hasAssistantToolCall(messages, "tail-call") {
+		t.Fatalf("snip compaction left an orphan tool result: %+v", messages)
+	}
+	if !containsUserContent(messages, "latest question") {
+		t.Fatalf("latest user message should be preserved: %+v", messages)
+	}
+}
+
+func TestContextBuilderBudgetKeepsLatestUserAndAvoidsOrphanToolResult(t *testing.T) {
+	input := []*schema.Message{
+		schema.SystemMessage("system"),
+		schema.UserMessage("current question"),
+		assistantToolCall("call-big", "read"),
+		schema.ToolMessage(strings.Repeat("T", 500), "call-big", schema.WithToolName("read")),
+	}
+	builder := NewContextBuilder("system")
+	builder.maxInputRunes = 120
+	builder.conversationBudgetRunes = 40
+	builder.toolResultBudgetRunes = 0
+
+	messages, err := builder.Build(context.Background(), nil, input)
+
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	if !containsUserContent(messages, "current question") {
+		t.Fatalf("latest user message should be preserved: %+v", messages)
+	}
+	if containsToolContentSubstring(messages, "call-big", "") && !hasAssistantToolCall(messages, "call-big") {
+		t.Fatalf("budget pruning left an orphan tool result: %+v", messages)
+	}
+}
+
+func assistantToolCall(id string, name string) *schema.Message {
+	return schema.AssistantMessage("", []schema.ToolCall{{
+		ID: id,
+		Function: schema.FunctionCall{
+			Name:      name,
+			Arguments: `{}`,
+		},
+	}})
+}
+
 func hasAssistantToolCall(messages []*schema.Message, callID string) bool {
 	for _, message := range messages {
 		if message == nil || message.Role != schema.Assistant {
@@ -200,6 +329,21 @@ func hasAssistantToolCall(messages []*schema.Message, callID string) bool {
 			if call.ID == callID {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func containsToolContentSubstring(messages []*schema.Message, callID string, content string) bool {
+	for _, message := range messages {
+		if message == nil || message.Role != schema.Tool {
+			continue
+		}
+		if callID != "" && message.ToolCallID != callID {
+			continue
+		}
+		if strings.Contains(message.Content, content) {
+			return true
 		}
 	}
 	return false

@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"strings"
-	"time"
 
 	"ternura/agent"
 	"ternura/internal/cron"
@@ -27,14 +26,16 @@ func (s *agentServer) handleFeishuMessage(ctx context.Context, msg feishu.Inboun
 		return feishu.Reply{}, err
 	}
 
-	run := newRunLifecycle()
-	logRunStart(run)
-	if err := s.store.StartRunForSession(sessionID, run, msg.Content); err != nil {
-		log.Printf("persist feishu run start %s: %v", run.ID, err)
-	}
+	session := s.newAgentSession(sessionID, nil)
 
 	if result, handled, err := s.tryScheduleShortcutForSession(ctx, msg.Content, sessionID, delivery); handled {
-		return s.finishFeishuRun(sessionID, run, msg.Content, result, err)
+		outcome := session.run(ctx, agentSessionRunRequest{
+			Kind:           agentSessionRunUser,
+			DisplayMessage: msg.Content,
+			DirectResult:   &result,
+			DirectErr:      err,
+		})
+		return formatFeishuOutcome(outcome)
 	}
 
 	cronTool := tool.NewCronTool(
@@ -42,9 +43,12 @@ func (s *agentServer) handleFeishuMessage(ctx context.Context, msg feishu.Inboun
 		s.cronList,
 		s.cronRemove,
 	)
-	agent := s.newAgentForSessionWithCron(sessionID, cronTool)
-	result, err := agent.RunWithTrace(ctx, msg.Content)
-	return s.finishFeishuRun(sessionID, run, msg.Content, result, err)
+	session.cronTool = cronTool
+	outcome := session.run(ctx, agentSessionRunRequest{
+		Kind:           agentSessionRunUser,
+		DisplayMessage: msg.Content,
+	})
+	return formatFeishuOutcome(outcome)
 }
 
 func (s *agentServer) resetFeishuSession(_ context.Context, sessionID string, msg feishu.InboundMessage) (feishu.Reply, error) {
@@ -58,15 +62,17 @@ func (s *agentServer) resetFeishuSession(_ context.Context, sessionID string, ms
 	}
 	s.resetAgentFromSnapshot(s.store.Snapshot())
 
-	run := newRunLifecycle()
-	logRunStart(run)
-	if err := s.store.StartRunForSession(sessionID, run, msg.Content); err != nil {
-		log.Printf("persist feishu reset run start %s: %v", run.ID, err)
-	}
+	session := s.newAgentSession(sessionID, nil)
 	result := agent.AgentRunResult{
 		Content: "新会话已开始。这个飞书会话的历史消息、短期记忆、工具记忆和待办都已清空。",
 	}
-	return s.finishFeishuResetRun(sessionID, run, msg.Content, result)
+	outcome := session.run(context.Background(), agentSessionRunRequest{
+		Kind:           agentSessionRunUser,
+		DisplayMessage: msg.Content,
+		DirectResult:   &result,
+		OmitMessages:   true,
+	})
+	return formatFeishuOutcome(outcome)
 }
 
 func messageRequestsNewSession(content string) bool {
@@ -81,29 +87,16 @@ func messageRequestsNewSession(content string) bool {
 	}
 }
 
-func (s *agentServer) finishFeishuRun(sessionID string, run runLifecycle, message string, result agent.AgentRunResult, runErr error) (feishu.Reply, error) {
-	finished := time.Now()
-	status := runStatusSucceeded
-	if runErr != nil {
-		status = runStatusFailed
+func formatFeishuOutcome(outcome agentSessionRunOutcome) (feishu.Reply, error) {
+	reply := formatFeishuAgentReply(outcome.Result)
+	if outcome.Err != nil {
+		if strings.TrimSpace(reply.Content) != "" || reply.Card != nil {
+			log.Printf("feishu agent turn failed for run %s: %v", outcome.Run.ID, outcome.Err)
+			return reply, nil
+		}
+		return feishu.Reply{}, outcome.Err
 	}
-	logRunFinish(run, status, finished)
-	if err := s.store.FinishRunForSession(sessionID, run, message, result, status, finished, runErr); err != nil {
-		log.Printf("persist feishu run %s: %v", run.ID, err)
-	}
-	if runErr != nil {
-		return formatFeishuAgentReply(result), runErr
-	}
-	return formatFeishuAgentReply(result), nil
-}
-
-func (s *agentServer) finishFeishuResetRun(sessionID string, run runLifecycle, message string, result agent.AgentRunResult) (feishu.Reply, error) {
-	finished := time.Now()
-	logRunFinish(run, runStatusSucceeded, finished)
-	if err := s.store.FinishRunForSessionWithoutMessages(sessionID, run, message, result, runStatusSucceeded, finished, nil); err != nil {
-		log.Printf("persist feishu reset run %s: %v", run.ID, err)
-	}
-	return formatFeishuAgentReply(result), nil
+	return reply, nil
 }
 
 func feishuDeliveryTarget(msg feishu.InboundMessage) *cron.DeliveryTarget {

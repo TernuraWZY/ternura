@@ -106,41 +106,29 @@ func (s *agentServer) runCronJob(ctx context.Context, job cron.Job) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	run := newRunLifecycle()
 	display := strings.TrimSpace(job.Payload.Message)
-	log.Printf("cron job %s started run %s for session %s", job.ID, run.ID, job.Payload.SessionID)
-	logRunStart(run)
-
-	if err := s.store.StartScheduledRunForSession(job.Payload.SessionID, run, display); err != nil {
-		finished := time.Now()
-		logRunFinish(run, runStatusFailed, finished)
-		if completeErr := s.cron.RecordRun(context.Background(), job.ID, run.ID, run.StartedAt, err); completeErr != nil {
+	cronTool := tool.NewCronTool(s.cronAddForSession(job.Payload.SessionID), s.cronList, s.cronRemove)
+	cronTool.SetCronContext(true)
+	session := s.newAgentSession(job.Payload.SessionID, cronTool)
+	runtimePrompt := wrapCronRuntimePrompt(display)
+	outcome := session.run(ctx, agentSessionRunRequest{
+		Kind:           agentSessionRunScheduled,
+		DisplayMessage: display,
+		RuntimePrompt:  runtimePrompt,
+	})
+	log.Printf("cron job %s finished agent run %s for session %s", job.ID, outcome.Run.ID, job.Payload.SessionID)
+	if outcome.Err != nil {
+		if completeErr := s.cron.RecordRun(context.Background(), job.ID, outcome.Run.ID, outcome.Run.StartedAt, outcome.Err); completeErr != nil {
 			log.Printf("complete failed cron job %s: %v", job.ID, completeErr)
 		}
 		return
 	}
 
-	runtimePrompt := wrapCronRuntimePrompt(display)
-	cronTool := tool.NewCronTool(s.cronAddForSession(job.Payload.SessionID), s.cronList, s.cronRemove)
-	cronTool.SetCronContext(true)
-	agent := s.newAgentForSessionWithCron(job.Payload.SessionID, cronTool)
-	started := run.StartedAt
-	result, err := agent.RunWithTrace(ctx, runtimePrompt)
-	finished := time.Now()
-
-	status := runStatusSucceeded
-	if err != nil {
-		status = runStatusFailed
-	}
-	logRunFinish(run, status, finished)
-	if persistErr := s.store.FinishScheduledRunForSession(job.Payload.SessionID, run, display, runtimePrompt, result, status, finished, err); persistErr != nil {
-		log.Printf("persist cron run %s: %v", run.ID, persistErr)
-	}
-	if completeErr := s.cron.RecordRun(context.Background(), job.ID, run.ID, started, err); completeErr != nil {
+	if completeErr := s.cron.RecordRun(context.Background(), job.ID, outcome.Run.ID, outcome.Run.StartedAt, outcome.Err); completeErr != nil {
 		log.Printf("complete cron job %s: %v", job.ID, completeErr)
 	}
-	if err == nil && job.Payload.Deliver && job.Payload.Delivery != nil {
-		s.deliverCronResult(ctx, job, result)
+	if outcome.Err == nil && job.Payload.Deliver && job.Payload.Delivery != nil {
+		s.deliverCronResult(ctx, job, outcome.Result)
 	}
 
 	if job.Payload.SessionID == s.store.CurrentSessionID() {
@@ -239,16 +227,6 @@ func formatCronTiming(job cron.Job) string {
 	}
 }
 
-func (s *agentServer) newAgentForSession(sessionID string) *agent.Agent {
-	return s.newAgentForSessionWithCron(sessionID, tool.NewCronTool(s.cronAddForSession(sessionID), s.cronList, s.cronRemove))
-}
-
 func (s *agentServer) newAgentForSessionWithCron(sessionID string, cronTool *tool.CronTool) *agent.Agent {
-	sessionAgent := newAgentFromSkillRegistry(s.modelConf, s.newSkillRegistry(sessionID, cronTool))
-
-	snapshot := s.store.Snapshot()
-	if session := findSession(snapshot.Sessions, sessionID); session != nil && len(session.Messages) > 0 {
-		_ = restoreAgentConversation(sessionAgent, session.Messages)
-	}
-	return sessionAgent
+	return s.newAgentSession(sessionID, cronTool).agent()
 }

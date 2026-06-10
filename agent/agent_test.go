@@ -136,6 +136,62 @@ func TestRunWithTraceRetriesWhenFinalizeRequiresTool(t *testing.T) {
 	}
 }
 
+func TestRunWithTraceCompactsLongContextWithModelSummaryBeforeAnswer(t *testing.T) {
+	model := &scriptedChatModel{}
+	model.generate = func(call int, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
+		switch call {
+		case 1:
+			if !containsUserContent(input, "old context") || !containsUserContent(input, "current question") {
+				t.Fatalf("summary input missing old and current context: %+v", input)
+			}
+			return schema.AssistantMessage("Summary: old context was compressed; current question is the active task.", nil), nil
+		case 2:
+			if !containsUserContent(input, compactSummaryPrefix) {
+				t.Fatalf("answer input missing compact summary message: %+v", input)
+			}
+			if !containsUserContent(input, "Summary: old context was compressed") {
+				t.Fatalf("answer input missing generated summary: %+v", input)
+			}
+			if !containsUserContent(input, "current question") {
+				t.Fatalf("answer input missing exact latest user message: %+v", input)
+			}
+			if containsUserContent(input, strings.Repeat("A", 200)) {
+				t.Fatalf("answer input should not carry the full old long context: %+v", input)
+			}
+			return schema.AssistantMessage("done", nil), nil
+		default:
+			t.Fatalf("unexpected generate call %d", call)
+			return nil, nil
+		}
+	}
+
+	agent := NewAgent(testModelConfig(), "system", nil)
+	agent.chatModel = model
+	agent.contextBuilder.compactSummaryThresholdRunes = 200
+	agent.contextBuilder.compactSummaryInputRunes = 5000
+	agent.contextBuilder.compactSummaryRunes = 500
+	agent.contextBuilder.compactSummaryTailRunes = 120
+	agent.contextBuilder.maxInputRunes = 10000
+	agent.messages = append(agent.messages, schema.UserMessage("old context "+strings.Repeat("A", 2000)))
+
+	result, err := agent.RunWithTrace(context.Background(), "current question")
+	if err != nil {
+		t.Fatalf("run with trace: %v", err)
+	}
+	if result.Content != "done" {
+		t.Fatalf("content = %q, want done", result.Content)
+	}
+	if model.generateCalls != 2 {
+		t.Fatalf("generate calls = %d, want summary plus answer", model.generateCalls)
+	}
+	if len(result.ModelInput) != 1 || !modelInputContainsRoleContent(result.ModelInput[0], "user", compactSummaryPrefix) {
+		t.Fatalf("model input snapshot missing compact summary: %+v", result.ModelInput)
+	}
+	if !traceContainsTitle(result.Trace, "Context compact") {
+		t.Fatalf("trace missing context compact item: %+v", result.Trace)
+	}
+}
+
 func TestRunStreamingUsesEinoReactToolLoop(t *testing.T) {
 	fakeTool := &fakeAgentTool{
 		name:   tool.AgentTool("fake_stream_tool"),
@@ -347,6 +403,15 @@ func modelInputContainsRoleContent(snapshot ModelInputSnapshot, role string, con
 func modelInputContainsToolMessage(snapshot ModelInputSnapshot, callID string, content string) bool {
 	for _, message := range snapshot.Messages {
 		if message.Role == "tool" && message.ToolCallID == callID && strings.Contains(message.Content, content) {
+			return true
+		}
+	}
+	return false
+}
+
+func traceContainsTitle(trace []AgentTraceItem, title string) bool {
+	for _, item := range trace {
+		if item.Title == title {
 			return true
 		}
 	}

@@ -163,10 +163,12 @@ func (r *einoAgentRun) buildModelMessages(ctx context.Context, input []*schema.M
 	if builder == nil {
 		builder = NewContextBuilder(r.agent.systemPrompt)
 	}
-	messages, err := builder.Build(ctx, r.runCtx, input)
+	messages, err := builder.BuildPreCompact(ctx, r.runCtx, input)
 	if err != nil {
 		return nil, err
 	}
+	messages = r.compactHistoryIfNeeded(ctx, builder, messages)
+	messages = builder.FinalizeBudget(messages)
 	r.recordModelInput(messages)
 	return messages, nil
 }
