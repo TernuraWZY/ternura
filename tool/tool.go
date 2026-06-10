@@ -24,6 +24,7 @@ const (
 	AgentToolForgetMemory AgentTool = "forget_memory"
 	AgentToolCron         AgentTool = "cron"
 	AgentToolWebFetch     AgentTool = "web_fetch"
+	AgentToolCompact      AgentTool = "compact"
 )
 
 type Tool interface {

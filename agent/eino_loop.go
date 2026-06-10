@@ -90,8 +90,17 @@ func (r *einoAgentRun) Generate(ctx context.Context) (*schema.Message, error) {
 	}
 	message, err := r.react.Generate(ctx, messages, r.traceCallbackOption())
 	if err != nil {
+		if isPromptTooLongError(err) {
+			builder := r.contextBuilder()
+			messages = r.reactiveCompactHistory(ctx, builder, messages)
+			message, err = r.react.Generate(ctx, messages, r.traceCallbackOption())
+			if err == nil {
+				goto generated
+			}
+		}
 		return nil, err
 	}
+generated:
 	if err := r.modelCallError(); err != nil {
 		return nil, err
 	}
@@ -112,10 +121,19 @@ func (r *einoAgentRun) Stream(ctx context.Context) (*schema.Message, error) {
 	}
 	stream, err := r.react.Stream(streamCtx, messages, r.traceCallbackOption())
 	if err != nil {
+		if isPromptTooLongError(err) {
+			builder := r.contextBuilder()
+			messages = r.reactiveCompactHistory(ctx, builder, messages)
+			stream, err = r.react.Stream(streamCtx, messages, r.traceCallbackOption())
+			if err == nil {
+				goto streaming
+			}
+		}
 		log.Printf("failed to stream Eino ReAct agent: %v", err)
 		return nil, err
 	}
 
+streaming:
 	message, err := schema.ConcatMessageStream(stream)
 	if err != nil {
 		cancel()
@@ -159,10 +177,7 @@ func (r *einoAgentRun) messageModifier(ctx context.Context, input []*schema.Mess
 }
 
 func (r *einoAgentRun) buildModelMessages(ctx context.Context, input []*schema.Message) ([]*schema.Message, error) {
-	builder := r.agent.contextBuilder
-	if builder == nil {
-		builder = NewContextBuilder(r.agent.systemPrompt)
-	}
+	builder := r.contextBuilder()
 	messages, err := builder.BuildPreCompact(ctx, r.runCtx, input)
 	if err != nil {
 		return nil, err
@@ -171,6 +186,28 @@ func (r *einoAgentRun) buildModelMessages(ctx context.Context, input []*schema.M
 	messages = builder.FinalizeBudget(messages)
 	r.recordModelInput(messages)
 	return messages, nil
+}
+
+func (r *einoAgentRun) contextBuilder() *ContextBuilder {
+	if r == nil || r.agent == nil || r.agent.contextBuilder == nil {
+		systemPrompt := ""
+		if r != nil && r.agent != nil {
+			systemPrompt = r.agent.systemPrompt
+		}
+		return NewContextBuilder(systemPrompt)
+	}
+	return r.agent.contextBuilder
+}
+
+func isPromptTooLongError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "prompt_too_long") ||
+		strings.Contains(lower, "too many tokens") ||
+		strings.Contains(lower, "context length") ||
+		strings.Contains(lower, "maximum context")
 }
 
 func (r *einoAgentRun) recordModelInput(messages []*schema.Message) {

@@ -223,7 +223,7 @@ func TestToolCallMiddlewareLimitsLargeToolOutput(t *testing.T) {
 	}
 	for _, want := range []string{
 		"[tool output truncated:",
-		"original 20123 characters",
+		"original 50123 characters",
 		"omitted 123 characters",
 	} {
 		if !strings.Contains(output.Result, want) {

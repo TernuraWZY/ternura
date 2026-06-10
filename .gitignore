@@ -1,5 +1,7 @@
 .env
 .ternura/
+.transcripts/
+.task_outputs/
 .gocache/
 .gomodcache/
 bin/

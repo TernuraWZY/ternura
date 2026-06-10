@@ -170,7 +170,7 @@ func TestRunWithTraceCompactsLongContextWithModelSummaryBeforeAnswer(t *testing.
 	agent.contextBuilder.compactSummaryThresholdRunes = 200
 	agent.contextBuilder.compactSummaryInputRunes = 5000
 	agent.contextBuilder.compactSummaryRunes = 500
-	agent.contextBuilder.compactSummaryTailRunes = 120
+	agent.contextBuilder.compactTranscriptDir = t.TempDir()
 	agent.contextBuilder.maxInputRunes = 10000
 	agent.messages = append(agent.messages, schema.UserMessage("old context "+strings.Repeat("A", 2000)))
 
@@ -186,6 +186,114 @@ func TestRunWithTraceCompactsLongContextWithModelSummaryBeforeAnswer(t *testing.
 	}
 	if len(result.ModelInput) != 1 || !modelInputContainsRoleContent(result.ModelInput[0], "user", compactSummaryPrefix) {
 		t.Fatalf("model input snapshot missing compact summary: %+v", result.ModelInput)
+	}
+	if !traceContainsTitle(result.Trace, "Context compact") {
+		t.Fatalf("trace missing context compact item: %+v", result.Trace)
+	}
+}
+
+func TestRunWithTraceReactiveCompactsPromptTooLong(t *testing.T) {
+	model := &scriptedChatModel{}
+	model.generate = func(call int, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
+		switch call {
+		case 1:
+			if !containsUserContent(input, "current question") {
+				t.Fatalf("first input missing current question: %+v", input)
+			}
+			return nil, errors.New("prompt_too_long: context length exceeded")
+		case 2:
+			if !containsUserContent(input, "old context") || !containsUserContent(input, "current question") {
+				t.Fatalf("reactive summary input missing transcript content: %+v", input)
+			}
+			return schema.AssistantMessage("Reactive summary: continue answering the current question.", nil), nil
+		case 3:
+			if !containsUserContent(input, compactSummaryPrefix) {
+				t.Fatalf("retry input missing compact summary: %+v", input)
+			}
+			if !containsUserContent(input, "Reactive summary") {
+				t.Fatalf("retry input missing generated summary: %+v", input)
+			}
+			if !containsUserContent(input, "current question") {
+				t.Fatalf("retry input should keep recent tail messages: %+v", input)
+			}
+			return schema.AssistantMessage("done after compact", nil), nil
+		default:
+			t.Fatalf("unexpected generate call %d", call)
+			return nil, nil
+		}
+	}
+
+	agent := NewAgent(testModelConfig(), "system", nil)
+	agent.chatModel = model
+	agent.contextBuilder.compactTranscriptDir = t.TempDir()
+	agent.contextBuilder.compactReactiveTailMessages = 5
+	agent.messages = append(agent.messages, schema.UserMessage("old context "+strings.Repeat("A", 2000)))
+
+	result, err := agent.RunWithTrace(context.Background(), "current question")
+	if err != nil {
+		t.Fatalf("run with trace: %v", err)
+	}
+	if result.Content != "done after compact" {
+		t.Fatalf("content = %q, want done after compact", result.Content)
+	}
+	if model.generateCalls != 3 {
+		t.Fatalf("generate calls = %d, want first error, summary, retry", model.generateCalls)
+	}
+	if !traceContainsTitle(result.Trace, "Context compact") {
+		t.Fatalf("trace missing context compact item: %+v", result.Trace)
+	}
+}
+
+func TestRunWithTraceCompactToolTriggersSummaryBeforeNextModelCall(t *testing.T) {
+	model := &scriptedChatModel{}
+	model.generate = func(call int, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
+		switch call {
+		case 1:
+			return schema.AssistantMessage("", []schema.ToolCall{{
+				ID: "call-compact",
+				Function: schema.FunctionCall{
+					Name:      string(tool.AgentToolCompact),
+					Arguments: `{"focus":"current task"}`,
+				},
+			}}), nil
+		case 2:
+			if !containsUserContent(input, "please compact before continuing") {
+				t.Fatalf("compact summary input missing original conversation: %+v", input)
+			}
+			if !containsUserContent(input, "tool_name: compact") || !containsUserContent(input, "Compaction requested. Conversation history will be summarized before the next model call. Focus: current task") {
+				t.Fatalf("compact summary input missing compact tool result transcript: %+v", input)
+			}
+			return schema.AssistantMessage("Manual summary: current task should continue.", nil), nil
+		case 3:
+			if !containsUserContent(input, compactSummaryPrefix) {
+				t.Fatalf("next model input missing compact summary: %+v", input)
+			}
+			if !containsUserContent(input, "Manual summary") {
+				t.Fatalf("next model input missing generated compact summary: %+v", input)
+			}
+			if containsToolMessage(input, "call-compact", "Compaction requested. Conversation history will be summarized before the next model call. Focus: current task") {
+				t.Fatalf("compact tool result should not remain after compact_history: %+v", input)
+			}
+			return schema.AssistantMessage("done", nil), nil
+		default:
+			t.Fatalf("unexpected generate call %d", call)
+			return nil, nil
+		}
+	}
+
+	agent := NewAgent(testModelConfig(), "system", []tool.Tool{tool.NewCompactTool()})
+	agent.chatModel = model
+	agent.contextBuilder.compactTranscriptDir = t.TempDir()
+
+	result, err := agent.RunWithTrace(context.Background(), "please compact before continuing")
+	if err != nil {
+		t.Fatalf("run with trace: %v", err)
+	}
+	if result.Content != "done" {
+		t.Fatalf("content = %q, want done", result.Content)
+	}
+	if model.generateCalls != 3 {
+		t.Fatalf("generate calls = %d, want tool call, summary, final", model.generateCalls)
 	}
 	if !traceContainsTitle(result.Trace, "Context compact") {
 		t.Fatalf("trace missing context compact item: %+v", result.Trace)

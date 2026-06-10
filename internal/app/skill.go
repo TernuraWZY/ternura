@@ -86,6 +86,7 @@ func newWorkspaceSkill(updateTodos tool.UpdateTodosFunc) agent.Skill {
 			tool.NewWriteTool(),
 			tool.NewBashTool(),
 			tool.NewUpdateTodosTool(updateTodos),
+			tool.NewCompactTool(),
 		},
 	})
 }

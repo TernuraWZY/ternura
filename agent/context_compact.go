@@ -2,17 +2,21 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 )
 
-const compactSummaryPrefix = "[Context compacted summary]"
+const compactSummaryPrefix = "[Compacted]"
 
 func (r *einoAgentRun) compactHistoryIfNeeded(ctx context.Context, builder *ContextBuilder, messages []*schema.Message) []*schema.Message {
-	if r == nil || builder == nil || !builder.NeedsSummaryCompact(messages) {
+	if r == nil || builder == nil || (!builder.NeedsSummaryCompact(messages) && !containsCompactToolResult(messages)) {
 		return messages
 	}
 	if containsCompactSummaryMessage(messages) {
@@ -20,38 +24,56 @@ func (r *einoAgentRun) compactHistoryIfNeeded(ctx context.Context, builder *Cont
 	}
 
 	beforeRunes := messagesRunes(messages)
-	summary, err := r.summarizeContext(ctx, builder, messages)
+	summary, transcriptPath, err := r.summarizeContext(ctx, builder, messages)
 	if err != nil {
 		log.Printf("context summary compact failed: %v", err)
-		r.recordContextCompactTrace(beforeRunes, beforeRunes, "", err)
+		r.recordContextCompactTrace(beforeRunes, beforeRunes, "", transcriptPath, err)
 		return messages
 	}
 	if strings.TrimSpace(summary) == "" {
 		err := fmt.Errorf("empty compact summary")
 		log.Printf("context summary compact failed: %v", err)
-		r.recordContextCompactTrace(beforeRunes, beforeRunes, "", err)
+		r.recordContextCompactTrace(beforeRunes, beforeRunes, "", transcriptPath, err)
 		return messages
 	}
 
-	compacted := compactedSummaryMessages(builder, messages, summary)
-	r.recordContextCompactTrace(beforeRunes, messagesRunes(compacted), summary, nil)
+	compacted := compactedHistoryMessages(messages, summary)
+	r.recordContextCompactTrace(beforeRunes, messagesRunes(compacted), summary, transcriptPath, nil)
 	return compacted
 }
 
-func (r *einoAgentRun) summarizeContext(ctx context.Context, builder *ContextBuilder, messages []*schema.Message) (string, error) {
-	if r == nil || r.agent == nil || r.agent.chatModel == nil {
-		return "", fmt.Errorf("chat model is not initialized")
+func (r *einoAgentRun) reactiveCompactHistory(ctx context.Context, builder *ContextBuilder, messages []*schema.Message) []*schema.Message {
+	if r == nil || builder == nil || containsCompactSummaryMessage(messages) {
+		return messages
 	}
+	beforeRunes := messagesRunes(messages)
+	summary, transcriptPath, err := r.summarizeContext(ctx, builder, messages)
+	if err != nil {
+		log.Printf("reactive context compact failed: %v", err)
+		r.recordContextCompactTrace(beforeRunes, beforeRunes, "", transcriptPath, err)
+		return messages
+	}
+	compacted := reactiveCompactedMessages(builder, messages, summary)
+	r.recordContextCompactTrace(beforeRunes, messagesRunes(compacted), summary, transcriptPath, nil)
+	return compacted
+}
+
+func (r *einoAgentRun) summarizeContext(ctx context.Context, builder *ContextBuilder, messages []*schema.Message) (string, string, error) {
+	if r == nil || r.agent == nil || r.agent.chatModel == nil {
+		return "", "", fmt.Errorf("chat model is not initialized")
+	}
+	transcriptPath := writeCompactTranscript(messages, builder.compactTranscriptDir)
 	transcript := renderCompactTranscript(messagesWithoutSystem(messages), builder.compactSummaryInputRunes)
-	prompt := fmt.Sprintf(`Summarize this conversation history so the next model call can continue accurately with less context.
+	prompt := fmt.Sprintf(`Summarize this coding-agent conversation so work can continue.
 
-Keep only durable, task-relevant facts. Preserve:
-- the current user goal and latest explicit instructions
-- important decisions and constraints
-- files, sessions, job IDs, API endpoints, commands, errors, and tool results that matter
-- unfinished work, blockers, and next actions
+Preserve:
+1. current goal
+2. key findings/decisions
+3. files read/changed
+4. remaining work
+5. user constraints
 
-Do not include hidden chain-of-thought. Do not invent facts. Return concise Markdown only.
+Be compact but concrete. Do not include hidden chain-of-thought. Do not invent facts. Return concise Markdown only.
 
 Conversation transcript:
 
@@ -62,41 +84,48 @@ Conversation transcript:
 		schema.UserMessage(prompt),
 	})
 	if err != nil {
-		return "", err
+		return "", transcriptPath, err
 	}
 	if message == nil {
-		return "", fmt.Errorf("compact summary model returned nil message")
+		return "", transcriptPath, fmt.Errorf("compact summary model returned nil message")
 	}
 	if len(message.ToolCalls) > 0 {
-		return "", fmt.Errorf("compact summary model returned tool calls instead of summary")
+		return "", transcriptPath, fmt.Errorf("compact summary model returned tool calls instead of summary")
 	}
 	summary := strings.TrimSpace(message.Content)
 	if builder.compactSummaryRunes > 0 {
 		summary = trimRunesWithNotice(summary, builder.compactSummaryRunes, "context summary")
 	}
-	return summary, nil
+	return summary, transcriptPath, nil
 }
 
-func compactedSummaryMessages(builder *ContextBuilder, messages []*schema.Message, summary string) []*schema.Message {
+func compactedHistoryMessages(messages []*schema.Message, summary string) []*schema.Message {
 	if len(messages) == 0 {
 		return []*schema.Message{schema.UserMessage(formatCompactSummaryMessage(summary))}
 	}
-
-	compacted := make([]*schema.Message, 0, 2+len(messages))
-	compacted = append(compacted, messages[0])
-	compacted = append(compacted, schema.UserMessage(formatCompactSummaryMessage(summary)))
-
-	rest := removeCompactSummaryMessages(messagesWithoutSystem(messages))
-	tailBudget := defaultCompactSummaryTailRunes
-	if builder != nil && builder.compactSummaryTailRunes > 0 {
-		tailBudget = builder.compactSummaryTailRunes
+	if messages[0] != nil && messages[0].Role == schema.System {
+		return []*schema.Message{messages[0], schema.UserMessage(formatCompactSummaryMessage(summary))}
 	}
-	compacted = append(compacted, keepTailMessageGroups(rest, tailBudget)...)
-	return compacted
+	return []*schema.Message{schema.UserMessage(formatCompactSummaryMessage(summary))}
+}
+
+func reactiveCompactedMessages(builder *ContextBuilder, messages []*schema.Message, summary string) []*schema.Message {
+	compacted := compactedHistoryMessages(messages, summary)
+	rest := removeCompactSummaryMessages(messagesWithoutSystem(messages))
+	tailCount := defaultCompactReactiveTailMessages
+	if builder != nil && builder.compactReactiveTailMessages > 0 {
+		tailCount = builder.compactReactiveTailMessages
+	}
+	tailStart := len(rest) - tailCount
+	if tailStart < 0 {
+		tailStart = 0
+	}
+	tailStart = adjustTailStartForToolPair(rest, tailStart)
+	return append(compacted, rest[tailStart:]...)
 }
 
 func formatCompactSummaryMessage(summary string) string {
-	return compactSummaryPrefix + "\n\nThe earlier conversation was summarized to keep the model context within budget. Treat the exact recent messages and tool results after this summary as fresher than the summary.\n\n" + strings.TrimSpace(summary)
+	return compactSummaryPrefix + "\n\n" + strings.TrimSpace(summary)
 }
 
 func removeCompactSummaryMessages(messages []*schema.Message) []*schema.Message {
@@ -113,6 +142,15 @@ func removeCompactSummaryMessages(messages []*schema.Message) []*schema.Message 
 func containsCompactSummaryMessage(messages []*schema.Message) bool {
 	for _, message := range messages {
 		if isCompactSummaryMessage(message) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCompactToolResult(messages []*schema.Message) bool {
+	for _, message := range messages {
+		if message != nil && message.Role == schema.Tool && message.ToolName == "compact" {
 			return true
 		}
 	}
@@ -146,6 +184,35 @@ func renderCompactTranscript(messages []*schema.Message, budgetRunes int) string
 		builder.WriteString(renderCompactMessage(idx+1, message))
 	}
 	return trimMiddleRunes(builder.String(), budgetRunes, "conversation transcript")
+}
+
+func writeCompactTranscript(messages []*schema.Message, dir string) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	if strings.TrimSpace(dir) == "" {
+		dir = ".transcripts"
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	path := filepath.Join(dir, fmt.Sprintf("transcript_%d.jsonl", time.Now().Unix()))
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		path = filepath.Join(dir, fmt.Sprintf("transcript_%d.jsonl", time.Now().UnixNano()))
+		file, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return ""
+		}
+	}
+	defer file.Close()
+	encoder := json.NewEncoder(file)
+	for _, message := range messages {
+		if err := encoder.Encode(message); err != nil {
+			return path
+		}
+	}
+	return path
 }
 
 func renderCompactMessage(index int, message *schema.Message) string {
@@ -193,12 +260,15 @@ func trimMiddleRunes(content string, limit int, label string) string {
 	return string(runes[:head]) + notice + string(runes[len(runes)-tail:])
 }
 
-func (r *einoAgentRun) recordContextCompactTrace(beforeRunes int, afterRunes int, summary string, compactErr error) {
+func (r *einoAgentRun) recordContextCompactTrace(beforeRunes int, afterRunes int, summary string, transcriptPath string, compactErr error) {
 	if r == nil || r.result == nil {
 		return
 	}
 
 	content := fmt.Sprintf("**Before:** %d chars\n\n**After:** %d chars", beforeRunes, afterRunes)
+	if strings.TrimSpace(transcriptPath) != "" {
+		content += "\n\n**Transcript:** `" + transcriptPath + "`"
+	}
 	if compactErr != nil {
 		content += "\n\n**Status:** model summary compact failed; final budget pruning will be used as fallback.\n\n```text\n" + compactErr.Error() + "\n```"
 	} else {

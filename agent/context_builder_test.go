@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -60,7 +62,7 @@ func TestContextBuilderBuildMergesRuntimeContextIntoSystemMessage(t *testing.T) 
 	}
 }
 
-func TestContextBuilderBuildDropsHistoricalToolExchangeBeforeLatestUser(t *testing.T) {
+func TestContextBuilderBuildPreservesHistoricalToolExchangeBeforeLatestUser(t *testing.T) {
 	oldToolCall := schema.AssistantMessage("", []schema.ToolCall{{
 		ID: "old-call",
 		Function: schema.FunctionCall{
@@ -92,14 +94,14 @@ func TestContextBuilderBuildDropsHistoricalToolExchangeBeforeLatestUser(t *testi
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	if hasAssistantToolCall(messages, "old-call") {
-		t.Fatalf("historical assistant tool call should be dropped: %+v", messages)
+	if !hasAssistantToolCall(messages, "old-call") {
+		t.Fatalf("historical assistant tool call should be preserved: %+v", messages)
 	}
-	if containsToolMessage(messages, "old-call", "old huge output") {
-		t.Fatalf("historical tool result should be dropped: %+v", messages)
+	if !containsToolMessage(messages, "old-call", "old huge output") {
+		t.Fatalf("historical tool result should be preserved: %+v", messages)
 	}
-	if containsAssistantContent(messages, "old final answer") {
-		t.Fatalf("historical final assistant answer should be dropped: %+v", messages)
+	if !containsAssistantContent(messages, "old final answer") {
+		t.Fatalf("historical final assistant answer should be preserved: %+v", messages)
 	}
 	if !hasAssistantToolCall(messages, "current-call") {
 		t.Fatalf("current run assistant tool call should be kept: %+v", messages)
@@ -109,14 +111,12 @@ func TestContextBuilderBuildDropsHistoricalToolExchangeBeforeLatestUser(t *testi
 	}
 }
 
-func TestContextBuilderBuildDropsHistoricalAssistantMessages(t *testing.T) {
+func TestContextBuilderBuildPreservesHistoricalAssistantMessages(t *testing.T) {
 	input := []*schema.Message{
 		schema.SystemMessage("system"),
-		schema.UserMessage("old question"),
-		schema.AssistantMessage("<think>secret reasoning</think>\nold clean answer", nil),
-		schema.UserMessage("older repair case"),
-		schema.AssistantMessage("我拦截了这次回复：没有本轮工具证据支撑。", nil),
-		schema.UserMessage("current question"),
+		schema.UserMessage("阅读并分析一下当前项目结构"),
+		schema.AssistantMessage("已完成项目结构分析。", nil),
+		schema.UserMessage("我想继续睡"),
 	}
 	builder := NewContextBuilder("system")
 
@@ -125,14 +125,14 @@ func TestContextBuilderBuildDropsHistoricalAssistantMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	if containsAssistantContent(messages, "old clean answer") {
-		t.Fatalf("historical assistant answer should not be reused as model context: %+v", messages)
+	if !containsUserContent(messages, "阅读并分析一下当前项目结构") {
+		t.Fatalf("historical user message should be preserved with its answer: %+v", messages)
 	}
-	if containsAssistantContentSubstring(messages, "<think>") || containsAssistantContentSubstring(messages, "secret reasoning") {
-		t.Fatalf("historical think content should be stripped: %+v", messages)
+	if !containsAssistantContent(messages, "已完成项目结构分析。") {
+		t.Fatalf("historical assistant answer should be preserved to avoid orphan user history: %+v", messages)
 	}
-	if containsAssistantContentSubstring(messages, "我拦截了这次回复") {
-		t.Fatalf("historical guard/repair assistant content should be omitted: %+v", messages)
+	if !containsUserContent(messages, "我想继续睡") {
+		t.Fatalf("latest user message should be preserved: %+v", messages)
 	}
 }
 
@@ -217,7 +217,7 @@ func TestContextBuilderMicroCompactsOlderCurrentToolResults(t *testing.T) {
 	if containsToolMessage(messages, "call-1", "old output "+strings.Repeat("A", 200)) {
 		t.Fatalf("older tool result should be compacted: %+v", messages)
 	}
-	if !containsToolContentSubstring(messages, "call-1", "[Tool result compacted:") {
+	if !containsToolContentSubstring(messages, "call-1", "[Earlier tool result compacted. Re-run if needed.]") {
 		t.Fatalf("older tool result should keep compact placeholder: %+v", messages)
 	}
 	for _, want := range []string{"recent output 2", "recent output 3", "recent output 4"} {
@@ -228,18 +228,34 @@ func TestContextBuilderMicroCompactsOlderCurrentToolResults(t *testing.T) {
 }
 
 func TestContextBuilderToolResultBudgetCompactsLargeToolOutputs(t *testing.T) {
+	tempDir := t.TempDir()
 	input := []*schema.Message{
 		schema.SystemMessage("system"),
 		schema.UserMessage("current question"),
-		assistantToolCall("call-large-1", "bash"),
+		schema.AssistantMessage("", []schema.ToolCall{
+			{
+				ID: "call-large-1",
+				Function: schema.FunctionCall{
+					Name:      "bash",
+					Arguments: `{}`,
+				},
+			},
+			{
+				ID: "call-large-2",
+				Function: schema.FunctionCall{
+					Name:      "bash",
+					Arguments: `{}`,
+				},
+			},
+		}),
 		schema.ToolMessage("large one "+strings.Repeat("A", 200), "call-large-1", schema.WithToolName("bash")),
-		assistantToolCall("call-large-2", "bash"),
 		schema.ToolMessage("large two "+strings.Repeat("B", 200), "call-large-2", schema.WithToolName("bash")),
 	}
 	builder := NewContextBuilder("system")
 	builder.toolResultBudgetRunes = 180
 	builder.toolResultPreviewRunes = 60
-	builder.keepRecentToolResults = 1
+	builder.toolResultPersistThreshold = 60
+	builder.toolResultsDir = tempDir
 
 	messages, err := builder.Build(context.Background(), nil, input)
 
@@ -247,13 +263,18 @@ func TestContextBuilderToolResultBudgetCompactsLargeToolOutputs(t *testing.T) {
 		t.Fatalf("build context: %v", err)
 	}
 	if containsToolMessage(messages, "call-large-1", "large one "+strings.Repeat("A", 200)) {
-		t.Fatalf("large older tool output should be budget compacted: %+v", messages)
+		t.Fatalf("large tool output should be persisted out of model context: %+v", messages)
 	}
-	if !containsToolContentSubstring(messages, "call-large-1", "total tool-result budget") {
-		t.Fatalf("budget compaction reason missing: %+v", messages)
+	if !containsToolContentSubstring(messages, "call-large-1", "<persisted-output>") {
+		t.Fatalf("budget compaction marker missing: %+v", messages)
 	}
-	if !containsToolContentSubstring(messages, "call-large-2", "large two") {
-		t.Fatalf("latest tool result preview should remain available: %+v", messages)
+	if !containsToolContentSubstring(messages, "call-large-1", "Preview:\nlarge one") {
+		t.Fatalf("persisted output preview missing: %+v", messages)
+	}
+	for _, id := range []string{"call-large-1", "call-large-2"} {
+		if _, err := os.Stat(filepath.Join(tempDir, id+".txt")); err != nil {
+			t.Fatalf("persisted output file for %s missing: %v", id, err)
+		}
 	}
 }
 

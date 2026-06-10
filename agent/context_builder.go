@@ -3,7 +3,11 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -18,25 +22,29 @@ type ContextBuilder struct {
 	keepRecentToolResults        int
 	toolResultBudgetRunes        int
 	toolResultPreviewRunes       int
+	toolResultPersistThreshold   int
 	compactSummaryThresholdRunes int
 	compactSummaryInputRunes     int
 	compactSummaryRunes          int
-	compactSummaryTailRunes      int
+	compactReactiveTailMessages  int
+	toolResultsDir               string
+	compactTranscriptDir         string
 }
 
 const (
-	defaultMaxInputRunes                = 60000
+	defaultMaxInputRunes                = 50000
 	defaultRuntimeContextBudgetRunes    = 12000
-	defaultConversationBudgetRunes      = 45000
+	defaultConversationBudgetRunes      = 50000
 	defaultMaxConversationMessages      = 50
 	defaultSnipHeadMessages             = 3
 	defaultKeepRecentToolResults        = 3
-	defaultToolResultBudgetRunes        = 24000
-	defaultToolResultPreviewRunes       = 1200
-	defaultCompactSummaryThresholdRunes = 52000
-	defaultCompactSummaryInputRunes     = 90000
+	defaultToolResultBudgetRunes        = 200000
+	defaultToolResultPreviewRunes       = 2000
+	defaultToolResultPersistThreshold   = 30000
+	defaultCompactSummaryThresholdRunes = 50000
+	defaultCompactSummaryInputRunes     = 80000
 	defaultCompactSummaryRunes          = 6000
-	defaultCompactSummaryTailRunes      = 12000
+	defaultCompactReactiveTailMessages  = 5
 )
 
 func NewContextBuilder(systemPrompt string) *ContextBuilder {
@@ -50,10 +58,13 @@ func NewContextBuilder(systemPrompt string) *ContextBuilder {
 		keepRecentToolResults:        defaultKeepRecentToolResults,
 		toolResultBudgetRunes:        defaultToolResultBudgetRunes,
 		toolResultPreviewRunes:       defaultToolResultPreviewRunes,
+		toolResultPersistThreshold:   defaultToolResultPersistThreshold,
 		compactSummaryThresholdRunes: defaultCompactSummaryThresholdRunes,
 		compactSummaryInputRunes:     defaultCompactSummaryInputRunes,
 		compactSummaryRunes:          defaultCompactSummaryRunes,
-		compactSummaryTailRunes:      defaultCompactSummaryTailRunes,
+		compactReactiveTailMessages:  defaultCompactReactiveTailMessages,
+		toolResultsDir:               filepath.Join(".task_outputs", "tool-results"),
+		compactTranscriptDir:         ".transcripts",
 	}
 }
 
@@ -70,8 +81,6 @@ func (b *ContextBuilder) BuildPreCompact(_ context.Context, runCtx *RunContext, 
 	if b == nil {
 		return messages, nil
 	}
-	messages = pruneHistoricalToolExchange(messages)
-	messages = sanitizeHistoricalAssistantMessages(messages)
 	messages = b.applyToolResultBudget(messages)
 	messages = snipCompactMessages(messages, b.maxConversationMessages, b.snipHeadMessages)
 	messages = microCompactToolResults(messages, b.keepRecentToolResults, b.toolResultPreviewRunes)
@@ -264,7 +273,7 @@ func truncateMessageContent(message *schema.Message, budgetRunes int) *schema.Me
 }
 
 func (b *ContextBuilder) applyToolResultBudget(messages []*schema.Message) []*schema.Message {
-	toolIndexes := toolMessageIndexes(messages)
+	toolIndexes := latestToolResultIndexes(messages)
 	if len(toolIndexes) == 0 || b == nil || b.toolResultBudgetRunes <= 0 {
 		return messages
 	}
@@ -276,25 +285,17 @@ func (b *ContextBuilder) applyToolResultBudget(messages []*schema.Message) []*sc
 		return messages
 	}
 
-	protectedFrom := len(toolIndexes) - b.keepRecentToolResults
-	if protectedFrom < 0 {
-		protectedFrom = 0
-	}
-	for pos, idx := range toolIndexes {
+	ranked := append([]int(nil), toolIndexes...)
+	sortToolIndexesByContentSize(ranked, messages)
+	for _, idx := range ranked {
 		if total <= b.toolResultBudgetRunes {
 			break
 		}
-		if pos >= protectedFrom {
+		if runeLen(messages[idx].Content) <= b.toolResultPersistThreshold {
 			continue
 		}
 		before := runeLen(messages[idx].Content)
-		compactToolMessage(messages[idx], "older tool result compacted by total tool-result budget", b.toolResultPreviewRunes)
-		total -= before - runeLen(messages[idx].Content)
-	}
-	for pos := len(toolIndexes) - 1; pos >= 0 && total > b.toolResultBudgetRunes; pos-- {
-		idx := toolIndexes[pos]
-		before := runeLen(messages[idx].Content)
-		compactToolMessage(messages[idx], "tool result compacted by total tool-result budget", b.toolResultPreviewRunes)
+		persistLargeToolOutput(messages[idx], b.toolResultsDir, b.toolResultPreviewRunes)
 		total -= before - runeLen(messages[idx].Content)
 	}
 	return messages
@@ -325,23 +326,70 @@ func toolMessageIndexes(messages []*schema.Message) []int {
 	return indexes
 }
 
-func compactToolMessage(message *schema.Message, reason string, previewRunes int) {
-	if message == nil || message.Role != schema.Tool || strings.HasPrefix(message.Content, "[Tool result compacted:") {
+func latestToolResultIndexes(messages []*schema.Message) []int {
+	if len(messages) == 0 {
+		return nil
+	}
+	end := len(messages) - 1
+	if messages[end] == nil || messages[end].Role != schema.Tool {
+		return nil
+	}
+	start := end
+	for start > 0 && messages[start-1] != nil && messages[start-1].Role == schema.Tool {
+		start--
+	}
+	return indexesRange(start, end)
+}
+
+func indexesRange(start int, end int) []int {
+	indexes := make([]int, 0, end-start+1)
+	for idx := start; idx <= end; idx++ {
+		indexes = append(indexes, idx)
+	}
+	return indexes
+}
+
+func sortToolIndexesByContentSize(indexes []int, messages []*schema.Message) {
+	sort.SliceStable(indexes, func(i, j int) bool {
+		return runeLen(messages[indexes[i]].Content) > runeLen(messages[indexes[j]].Content)
+	})
+}
+
+func persistLargeToolOutput(message *schema.Message, dir string, previewRunes int) {
+	if message == nil || message.Role != schema.Tool || strings.HasPrefix(message.Content, "<persisted-output>") {
 		return
 	}
-	originalRunes := runeLen(message.Content)
-	preview := strings.TrimSpace(message.Content)
-	if previewRunes > 0 && runeLen(preview) > previewRunes {
-		preview = trimRunesWithNotice(preview, previewRunes, "tool result preview")
+	output := message.Content
+	if strings.TrimSpace(dir) == "" {
+		dir = filepath.Join(".task_outputs", "tool-results")
 	}
-	message.Content = fmt.Sprintf(
-		"[Tool result compacted: %s. tool=%s call_id=%s original_chars=%d.]\n\nPreview:\n%s",
-		strings.TrimSpace(reason),
-		message.ToolName,
-		message.ToolCallID,
-		originalRunes,
-		preview,
-	)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		compactToolMessage(message, "persist large output failed", previewRunes)
+		return
+	}
+	id := strings.TrimSpace(message.ToolCallID)
+	if id == "" {
+		id = fmt.Sprintf("tool-%d", time.Now().UnixNano())
+	}
+	path := filepath.Join(dir, id+".txt")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if writeErr := os.WriteFile(path, []byte(output), 0o600); writeErr != nil {
+			compactToolMessage(message, "persist large output failed", previewRunes)
+			return
+		}
+	}
+	preview := strings.TrimSpace(output)
+	if previewRunes > 0 && runeLen(preview) > previewRunes {
+		preview = string([]rune(preview)[:previewRunes])
+	}
+	message.Content = fmt.Sprintf("<persisted-output>\nFull output: %s\nPreview:\n%s\n</persisted-output>", path, preview)
+}
+
+func compactToolMessage(message *schema.Message, reason string, previewRunes int) {
+	if message == nil || message.Role != schema.Tool || strings.HasPrefix(message.Content, "[Earlier tool result compacted.") {
+		return
+	}
+	message.Content = "[Earlier tool result compacted. Re-run if needed.]"
 }
 
 func snipCompactMessages(messages []*schema.Message, maxMessages int, headMessages int) []*schema.Message {
@@ -396,37 +444,6 @@ func messageHasToolUse(message *schema.Message) bool {
 	return message != nil && message.Role == schema.Assistant && len(message.ToolCalls) > 0
 }
 
-func pruneHistoricalToolExchange(messages []*schema.Message) []*schema.Message {
-	lastUserIndex := latestUserMessageIndex(messages)
-	if lastUserIndex <= 0 {
-		return messages
-	}
-
-	pruned := make([]*schema.Message, 0, len(messages))
-	for idx, message := range messages {
-		if idx < lastUserIndex && isToolExchangeMessage(message) {
-			continue
-		}
-		pruned = append(pruned, message)
-	}
-	return pruned
-}
-
-func sanitizeHistoricalAssistantMessages(messages []*schema.Message) []*schema.Message {
-	lastUserIndex := latestUserMessageIndex(messages)
-	if lastUserIndex <= 0 {
-		return messages
-	}
-	sanitized := make([]*schema.Message, 0, len(messages))
-	for idx, message := range messages {
-		if message == nil || idx >= lastUserIndex || message.Role != schema.Assistant {
-			sanitized = append(sanitized, message)
-			continue
-		}
-	}
-	return sanitized
-}
-
 func latestUserMessageIndex(messages []*schema.Message) int {
 	for idx := len(messages) - 1; idx >= 0; idx-- {
 		if messages[idx] != nil && messages[idx].Role == schema.User {
@@ -434,13 +451,6 @@ func latestUserMessageIndex(messages []*schema.Message) int {
 		}
 	}
 	return -1
-}
-
-func isToolExchangeMessage(message *schema.Message) bool {
-	if message == nil {
-		return false
-	}
-	return message.Role == schema.Tool || len(message.ToolCalls) > 0
 }
 
 func cloneMessages(messages []*schema.Message) []*schema.Message {

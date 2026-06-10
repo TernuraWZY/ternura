@@ -3,9 +3,9 @@ package agent
 import "fmt"
 
 const (
-	maxToolResultContentRunes = 20000
-	toolResultHeadRunes       = 12000
-	toolResultTailRunes       = 8000
+	maxToolResultContentRunes = 50000
+	toolResultHeadRunes       = 30000
+	toolResultTailRunes       = 20000
 )
 
 func limitToolResultContent(content string) string {
