@@ -26,6 +26,7 @@ type einoAgentRun struct {
 	traceID int
 
 	mu                sync.Mutex
+	emitMu            sync.Mutex
 	ignoredToolPolicy ToolPolicy
 	requiredPolicies  []ToolPolicy
 	observedMessages  map[string]struct{}
@@ -482,9 +483,27 @@ func (r *einoAgentRun) newContentRouter() *streamingContentRouter {
 				r.result.Content += event.Delta
 			}
 			r.mu.Unlock()
-			return r.emit(event)
+			return r.emitEvent(event)
 		},
 	)
+}
+
+func (r *einoAgentRun) emitEvent(event AgentStreamEvent) error {
+	if r == nil || r.emit == nil {
+		return nil
+	}
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
+	return r.emit(event)
+}
+
+func (r *einoAgentRun) emitTrace(id string, item AgentTraceItem) error {
+	if r == nil || r.emit == nil {
+		return nil
+	}
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
+	return emitTraceItem(r.emit, id, item)
 }
 
 func (r *einoAgentRun) appendRawContent(content string) {
@@ -583,7 +602,7 @@ func (r *einoAgentRun) recordToolTrace(toolResult ToolResult) error {
 	r.mu.Unlock()
 
 	if r.emit != nil {
-		if err := emitTraceItem(r.emit, r.newTraceID(), traceItem); err != nil {
+		if err := r.emitTrace(r.newTraceID(), traceItem); err != nil {
 			return err
 		}
 	}

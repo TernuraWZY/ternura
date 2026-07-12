@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -12,7 +13,7 @@ type EditTool struct {
 
 func NewEditTool() *EditTool {
 	t := &EditTool{}
-	t.agentTool = newAgentTool(AgentToolEdit, "edit content in file", t.run)
+	t.agentTool = newAgentTool(AgentToolEdit, "replace the first exact occurrence of text in a file", t.run)
 	return t
 }
 
@@ -23,25 +24,30 @@ type EditToolParam struct {
 }
 
 func (t *EditTool) run(ctx context.Context, p EditToolParam) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if p.Before == "" {
+		return "", fmt.Errorf("before text must not be empty")
+	}
+
 	raw, err := os.ReadFile(p.Path)
 	if err != nil {
 		return "", err
 	}
-
-	backupPath := p.Path + ".bak"
-	err = os.WriteFile(backupPath, raw, 0644)
-	if err != nil {
-		return "", err
+	content := string(raw)
+	matches := strings.Count(content, p.Before)
+	if matches == 0 {
+		return "", fmt.Errorf("text not found in %s", p.Path)
 	}
 
-	replaced := strings.ReplaceAll(string(raw), p.Before, p.After)
-
-	err = os.WriteFile(p.Path, []byte(replaced), 0644)
-	if err != nil {
-		os.Rename(backupPath, p.Path)
+	mode := os.FileMode(0o644)
+	if info, statErr := os.Stat(p.Path); statErr == nil {
+		mode = info.Mode().Perm()
+	}
+	replaced := strings.Replace(content, p.Before, p.After, 1)
+	if err := writeFileAtomic(p.Path, []byte(replaced), mode); err != nil {
 		return "", err
 	}
-
-	os.Remove(backupPath)
-	return "", nil
+	return fmt.Sprintf("Edited %s (replaced 1 of %d matches)", p.Path, matches), nil
 }

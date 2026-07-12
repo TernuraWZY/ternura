@@ -2,7 +2,9 @@ package tool
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 )
 
 type WriteTool struct {
@@ -11,7 +13,7 @@ type WriteTool struct {
 
 func NewWriteTool() *WriteTool {
 	t := &WriteTool{}
-	t.agentTool = newAgentTool(AgentToolWrite, "write content to file", t.run)
+	t.agentTool = newAgentTool(AgentToolWrite, "write content to a file, creating parent directories when needed", t.run)
 	return t
 }
 
@@ -21,16 +23,14 @@ type WriteToolParam struct {
 }
 
 func (t *WriteTool) run(ctx context.Context, p WriteToolParam) (string, error) {
-	file, err := os.OpenFile(p.Path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	defer file.Close()
-
-	_, err = file.WriteString(p.Content)
-	if err != nil {
+	if err := os.MkdirAll(filepath.Dir(p.Path), 0o755); err != nil {
 		return "", err
 	}
-
-	return "", nil
+	if err := writeFileAtomic(p.Path, []byte(p.Content), 0o644); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Wrote %d bytes to %s", len([]byte(p.Content)), p.Path), nil
 }

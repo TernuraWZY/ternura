@@ -345,10 +345,10 @@ type Tool interface {
 
 当前内置工具：
 
-- `read`：读取本地文件
-- `write`：写入本地文件
-- `edit`：替换本地文件中的指定文本
-- `bash`：执行 shell 命令并返回输出
+- `read`：读取本地文件；默认读取全文，也可用零基 `offset` 和 `limit` 按行分段读取
+- `write`：写入本地文件，自动创建父目录，并返回写入路径和字节数
+- `edit`：精确匹配文本并只替换第一次命中；找不到目标文本时返回错误
+- `bash`：执行 shell 命令并合并返回 stdout/stderr；默认超时 120 秒，可用 `timeout_seconds` 调整，最大 600 秒
 - `update_todos`：替换当前 session 的完整任务列表，支持 `pending`、`in_progress`、`done`、`blocked` 和 `cancelled` 状态
 - `remember`：写入长期记忆，支持 `preference`、`profile`、`project`、`instruction`、`fact` 和 `other` 分类
 - `forget_memory`：按 memory id 删除长期记忆

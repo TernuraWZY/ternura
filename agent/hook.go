@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/cloudwego/eino/schema"
 
@@ -66,6 +67,7 @@ type RunContext struct {
 	disabledTools  map[tool.AgentTool]string
 	toolResults    []ToolExecution
 	toolPolicy     ToolPolicy
+	toolPolicyMu   sync.RWMutex
 	runLimits      RunLimits
 	toolCallCounts map[tool.AgentTool]int
 }
@@ -206,6 +208,8 @@ func (r *RunContext) SetToolPolicy(policy ToolPolicy) {
 	if r == nil {
 		return
 	}
+	r.toolPolicyMu.Lock()
+	defer r.toolPolicyMu.Unlock()
 	r.toolPolicy = normalizeToolPolicy(policy)
 }
 
@@ -214,6 +218,8 @@ func (r *RunContext) ClearToolPolicy() {
 	if r == nil {
 		return
 	}
+	r.toolPolicyMu.Lock()
+	defer r.toolPolicyMu.Unlock()
 	r.toolPolicy = ToolPolicy{}
 }
 
@@ -222,6 +228,8 @@ func (r *RunContext) RequestedToolPolicy() ToolPolicy {
 	if r == nil {
 		return ToolPolicy{}
 	}
+	r.toolPolicyMu.RLock()
+	defer r.toolPolicyMu.RUnlock()
 	return r.toolPolicy
 }
 
