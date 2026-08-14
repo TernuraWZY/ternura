@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,18 +42,22 @@ const (
 )
 
 type persistedRun struct {
-	RunID       string                     `json:"run_id"`
-	Status      string                     `json:"status"`
-	UserMessage string                     `json:"user_message"`
-	TriggerKind string                     `json:"trigger_kind,omitempty"`
-	Content     string                     `json:"content,omitempty"`
-	Trace       []agent.AgentTraceItem     `json:"trace,omitempty"`
-	RawContent  string                     `json:"raw_content,omitempty"`
-	ModelInput  []agent.ModelInputSnapshot `json:"model_input,omitempty"`
-	Error       string                     `json:"error,omitempty"`
-	StartedAt   string                     `json:"started_at,omitempty"`
-	FinishedAt  string                     `json:"finished_at,omitempty"`
-	DurationMS  int64                      `json:"duration_ms,omitempty"`
+	RunID           string                     `json:"run_id"`
+	Status          string                     `json:"status"`
+	UserMessage     string                     `json:"user_message"`
+	TriggerKind     string                     `json:"trigger_kind,omitempty"`
+	Content         string                     `json:"content,omitempty"`
+	Trace           []agent.AgentTraceItem     `json:"trace,omitempty"`
+	RawContent      string                     `json:"raw_content,omitempty"`
+	ModelInput      []agent.ModelInputSnapshot `json:"model_input,omitempty"`
+	CheckpointID    string                     `json:"checkpoint_id,omitempty"`
+	PendingApproval *agent.ToolApprovalRequest `json:"pending_approval,omitempty"`
+	Artifacts       []agent.AgentArtifact      `json:"artifacts,omitempty"`
+	Metrics         agent.RunMetrics           `json:"metrics,omitempty"`
+	Error           string                     `json:"error,omitempty"`
+	StartedAt       string                     `json:"started_at,omitempty"`
+	FinishedAt      string                     `json:"finished_at,omitempty"`
+	DurationMS      int64                      `json:"duration_ms,omitempty"`
 }
 
 type persistedTodo struct {
@@ -279,24 +284,36 @@ func (s *sessionStore) finishRunLocked(sessionID string, run runLifecycle, displ
 	session.UpdatedAt = finishedAt.Format(time.RFC3339Nano)
 
 	item := persistedRun{
-		RunID:       run.ID,
-		Status:      status,
-		UserMessage: displayMessage,
-		TriggerKind: normalizeTriggerKind(triggerKind),
-		Content:     result.Content,
-		Trace:       result.Trace,
-		RawContent:  result.RawContent,
-		ModelInput:  result.ModelInput,
-		StartedAt:   run.StartedAt.Format(time.RFC3339Nano),
-		FinishedAt:  finishedAt.Format(time.RFC3339Nano),
-		DurationMS:  durationMillis(run.StartedAt, finishedAt),
+		RunID:           run.ID,
+		Status:          status,
+		UserMessage:     displayMessage,
+		TriggerKind:     normalizeTriggerKind(triggerKind),
+		Content:         result.Content,
+		Trace:           result.Trace,
+		RawContent:      result.RawContent,
+		ModelInput:      result.ModelInput,
+		CheckpointID:    result.CheckpointID,
+		PendingApproval: result.PendingApproval,
+		Artifacts:       append([]agent.AgentArtifact(nil), result.Artifacts...),
+		Metrics:         result.Metrics,
+		StartedAt:       run.StartedAt.Format(time.RFC3339Nano),
+		FinishedAt:      finishedAt.Format(time.RFC3339Nano),
+		DurationMS:      durationMillis(run.StartedAt, finishedAt),
 	}
 	if runErr != nil {
 		item.Error = runErr.Error()
 	}
+	if status != runStatusCancelled && len(item.Artifacts) == 0 && strings.TrimSpace(item.Content) != "" {
+		item.Artifacts = []agent.AgentArtifact{{
+			ID:       "artifact-" + run.ID,
+			Name:     "response",
+			MIMEType: "text/markdown; charset=utf-8",
+			Content:  item.Content,
+		}}
+	}
 
 	upsertRun(session, item)
-	if status == runStatusSucceeded && result.Content != "" && strings.TrimSpace(runtimeMessage) != "" {
+	if (status == runStatusSucceeded || status == runStatusWaitingApproval) && result.Content != "" && strings.TrimSpace(runtimeMessage) != "" {
 		session.Messages = append(session.Messages, persistedMessage{Role: "user", Content: runtimeMessage})
 		assistantMessage := agent.CleanAssistantContentForHistory(result.Content)
 		if !agent.ShouldOmitAssistantFromHistory(assistantMessage) {
@@ -322,11 +339,93 @@ func (s *sessionStore) Snapshot() sessionSnapshot {
 	return cloneSnapshot(s.snapshot)
 }
 
+func (s *sessionStore) RunByID(runID string) (string, persistedRun, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, session := range s.snapshot.Sessions {
+		for _, run := range session.Runs {
+			if run.RunID == runID {
+				return session.SessionID, cloneRuns([]persistedRun{run})[0], true
+			}
+		}
+	}
+	return "", persistedRun{}, false
+}
+
+func (s *sessionStore) CancelRun(runID string, finishedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for sessionIdx := range s.snapshot.Sessions {
+		session := &s.snapshot.Sessions[sessionIdx]
+		for runIdx := range session.Runs {
+			run := &session.Runs[runIdx]
+			if run.RunID != runID {
+				continue
+			}
+			if run.Status != runStatusRunning && run.Status != runStatusWaitingApproval {
+				return fmt.Errorf("run %q is not cancellable in status %q", runID, run.Status)
+			}
+			run.Status = runStatusCancelled
+			run.Error = context.Canceled.Error()
+			run.FinishedAt = finishedAt.Format(time.RFC3339Nano)
+			if startedAt, err := time.Parse(time.RFC3339Nano, run.StartedAt); err == nil {
+				run.DurationMS = durationMillis(startedAt, finishedAt)
+			}
+			session.UpdatedAt = run.FinishedAt
+			return s.saveLocked()
+		}
+	}
+	return fmt.Errorf("run %q not found", runID)
+}
+
 func (s *sessionStore) CurrentSessionID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.snapshot.CurrentSessionID
+}
+
+func (s *sessionStore) PendingApprovalForSession(sessionID string, checkpointID string) (persistedRun, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session := s.findSessionLocked(sessionID)
+	if session == nil {
+		return persistedRun{}, false
+	}
+	checkpointID = strings.TrimSpace(checkpointID)
+	for idx := len(session.Runs) - 1; idx >= 0; idx-- {
+		run := session.Runs[idx]
+		if run.Status != runStatusWaitingApproval || run.PendingApproval == nil {
+			continue
+		}
+		if checkpointID != "" && run.CheckpointID != checkpointID {
+			continue
+		}
+		return run, true
+	}
+	return persistedRun{}, false
+}
+
+func (s *sessionStore) ResolvePendingApproval(sessionID string, checkpointID string, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session := s.findSessionLocked(sessionID)
+	if session == nil {
+		return fmt.Errorf("session %q not found", sessionID)
+	}
+	for idx := len(session.Runs) - 1; idx >= 0; idx-- {
+		if session.Runs[idx].Status != runStatusWaitingApproval || session.Runs[idx].CheckpointID != checkpointID {
+			continue
+		}
+		session.Runs[idx].Status = status
+		session.UpdatedAt = time.Now().Format(time.RFC3339Nano)
+		return s.saveLocked()
+	}
+	return fmt.Errorf("pending approval %q not found", checkpointID)
 }
 
 func (s *sessionStore) SelectSession(sessionID string) (sessionSnapshot, error) {
@@ -990,6 +1089,17 @@ func cloneRuns(runs []persistedRun) []persistedRun {
 	for idx, run := range runs {
 		cloned[idx] = run
 		cloned[idx].Trace = append([]agent.AgentTraceItem(nil), run.Trace...)
+		cloned[idx].Artifacts = append([]agent.AgentArtifact(nil), run.Artifacts...)
+		if run.Metrics.ToolCallsByName != nil {
+			cloned[idx].Metrics.ToolCallsByName = make(map[string]int, len(run.Metrics.ToolCallsByName))
+			for name, count := range run.Metrics.ToolCallsByName {
+				cloned[idx].Metrics.ToolCallsByName[name] = count
+			}
+		}
+		if run.PendingApproval != nil {
+			approval := *run.PendingApproval
+			cloned[idx].PendingApproval = &approval
+		}
 	}
 	return cloned
 }

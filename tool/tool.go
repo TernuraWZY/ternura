@@ -15,16 +15,18 @@ import (
 type AgentTool string
 
 const (
-	AgentToolRead         AgentTool = "read"
-	AgentToolWrite        AgentTool = "write"
-	AgentToolEdit         AgentTool = "edit"
-	AgentToolBash         AgentTool = "bash"
-	AgentToolUpdateTodos  AgentTool = "update_todos"
-	AgentToolRemember     AgentTool = "remember"
-	AgentToolForgetMemory AgentTool = "forget_memory"
-	AgentToolCron         AgentTool = "cron"
-	AgentToolWebFetch     AgentTool = "web_fetch"
-	AgentToolCompact      AgentTool = "compact"
+	AgentToolRead          AgentTool = "read"
+	AgentToolWrite         AgentTool = "write"
+	AgentToolEdit          AgentTool = "edit"
+	AgentToolBash          AgentTool = "bash"
+	AgentToolUpdateTodos   AgentTool = "update_todos"
+	AgentToolRemember      AgentTool = "remember"
+	AgentToolForgetMemory  AgentTool = "forget_memory"
+	AgentToolCron          AgentTool = "cron"
+	AgentToolWebSearch     AgentTool = "web_search"
+	AgentToolWebFetch      AgentTool = "web_fetch"
+	AgentToolCompact       AgentTool = "compact"
+	AgentToolDelegateAgent AgentTool = "delegate_agent"
 )
 
 type Tool interface {

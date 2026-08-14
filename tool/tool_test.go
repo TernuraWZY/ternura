@@ -34,6 +34,12 @@ func TestAgentToolSchemaInferredFromTags(t *testing.T) {
 			property: "todos",
 		},
 		{
+			name:     AgentToolWebSearch,
+			tool:     NewWebSearchTool(),
+			required: "query",
+			property: "query",
+		},
+		{
 			name:     AgentToolWebFetch,
 			tool:     NewWebFetchTool(),
 			required: "url",

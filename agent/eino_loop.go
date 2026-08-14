@@ -9,9 +9,10 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/compose"
-	einoreact "github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
 	"ternura/tool"
@@ -21,7 +22,7 @@ type einoAgentRun struct {
 	agent   *Agent
 	runCtx  *RunContext
 	result  *AgentRunResult
-	react   *einoreact.Agent
+	runner  *adk.Runner
 	emit    func(AgentStreamEvent) error
 	traceID int
 
@@ -34,8 +35,6 @@ type einoAgentRun struct {
 	toolResults       map[string]ToolResult
 	preparedModelCall bool
 	modelCallErr      error
-	callbackErr       error
-	callbackWG        sync.WaitGroup
 }
 
 func (a *Agent) newEinoAgentRun(ctx context.Context, runCtx *RunContext, result *AgentRunResult, emit func(AgentStreamEvent) error) (*einoAgentRun, error) {
@@ -58,99 +57,92 @@ func (a *Agent) newEinoAgentRun(ctx context.Context, runCtx *RunContext, result 
 	runtime.preparedModelCall = true
 
 	tools := a.toolsForRun(runCtx)
-
-	reactAgent, err := einoreact.NewAgent(ctx, &einoreact.AgentConfig{
-		ToolCallingModel: a.chatModel,
-		ToolsConfig: compose.ToolsNodeConfig{
-			Tools:               tools,
-			ExecuteSequentially: true,
-			ToolCallMiddlewares: []compose.ToolMiddleware{
-				runtime.toolCallMiddleware(),
-			},
-			UnknownToolsHandler: func(ctx context.Context, name, input string) (string, error) {
-				return fmt.Sprintf("tool not found: %s", name), nil
+	baseTools, toolSearchMiddleware, err := a.prepareToolSearch(ctx, runCtx, tools)
+	if err != nil {
+		return nil, fmt.Errorf("configure dynamic tool search: %w", err)
+	}
+	handlers := make([]adk.ChatModelAgentMiddleware, 0, 2)
+	if toolSearchMiddleware != nil {
+		handlers = append(handlers, toolSearchMiddleware)
+	}
+	handlers = append(handlers, &adkRuntimeMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+		run:                          runtime,
+	})
+	adkAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "ternura",
+		Description: "Ternura general-purpose tool-using agent",
+		Model:       a.chatModel,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools:               baseTools,
+				ExecuteSequentially: false,
+				ToolCallMiddlewares: []compose.ToolMiddleware{
+					runtime.toolCallMiddleware(),
+				},
+				UnknownToolsHandler: func(ctx context.Context, name, input string) (string, error) {
+					return fmt.Sprintf("tool not found: %s", name), nil
+				},
 			},
 		},
-		MaxStep:               a.reactMaxSteps(),
-		MessageModifier:       runtime.messageModifier,
-		StreamToolCallChecker: runtime.streamContainsToolCall,
+		MaxIterations: a.reactMaxSteps(),
+		GenModelInput: func(_ context.Context, _ string, input *adk.AgentInput) ([]*schema.Message, error) {
+			return input.Messages, nil
+		},
+		Handlers:            handlers,
+		ModelRetryConfig:    defaultModelRetryConfig(),
+		ModelFailoverConfig: defaultModelFailoverConfig(a.fallbackModels),
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	runtime.react = reactAgent
+	runtime.runner = adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:           adkAgent,
+		EnableStreaming: runCtx != nil && runCtx.Mode == RunModeStreaming,
+		CheckPointStore: a.checkpointStore,
+	})
 	return runtime, nil
 }
 
 func (r *einoAgentRun) Generate(ctx context.Context) (*schema.Message, error) {
-	log.Printf("calling Eino ReAct agent with model %s...", r.agent.model)
-	messages, err := r.buildModelMessages(ctx, r.agent.messages)
+	log.Printf("calling Eino ADK agent with model %s...", r.agent.model)
+	iter, err := r.startADKRun(ctx, cloneMessages(r.agent.messages))
 	if err != nil {
 		return nil, err
 	}
-	message, err := r.react.Generate(ctx, messages, r.traceCallbackOption())
-	if err != nil {
-		if isPromptTooLongError(err) {
-			builder := r.contextBuilder()
-			messages = r.reactiveCompactHistory(ctx, builder, messages)
-			message, err = r.react.Generate(ctx, messages, r.traceCallbackOption())
-			if err == nil {
-				goto generated
-			}
-		}
-		return nil, err
+	message, err := r.consumeADKEvents(ctx, iter)
+	if !isPromptTooLongError(err) {
+		return message, err
 	}
-generated:
-	if err := r.modelCallError(); err != nil {
-		return nil, err
+
+	compacted := r.reactiveCompactHistory(ctx, r.contextBuilder(), cloneMessages(r.agent.messages))
+	r.agent.messages = compacted
+	iter, startErr := r.startADKRun(ctx, compacted)
+	if startErr != nil {
+		return nil, startErr
 	}
-	if err := r.waitTraceCallbacks(); err != nil {
-		return nil, err
-	}
-	return message, nil
+	return r.consumeADKEvents(ctx, iter)
 }
 
 func (r *einoAgentRun) Stream(ctx context.Context) (*schema.Message, error) {
-	log.Printf("streaming Eino ReAct agent with model %s...", r.agent.model)
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	messages, err := r.buildModelMessages(ctx, r.agent.messages)
+	log.Printf("streaming Eino ADK agent with model %s...", r.agent.model)
+	iter, err := r.startADKRun(ctx, cloneMessages(r.agent.messages))
 	if err != nil {
 		return nil, err
 	}
-	stream, err := r.react.Stream(streamCtx, messages, r.traceCallbackOption())
-	if err != nil {
-		if isPromptTooLongError(err) {
-			builder := r.contextBuilder()
-			messages = r.reactiveCompactHistory(ctx, builder, messages)
-			stream, err = r.react.Stream(streamCtx, messages, r.traceCallbackOption())
-			if err == nil {
-				goto streaming
-			}
-		}
-		log.Printf("failed to stream Eino ReAct agent: %v", err)
-		return nil, err
+	message, err := r.consumeADKEvents(ctx, iter)
+	if !isPromptTooLongError(err) {
+		return message, err
 	}
 
-streaming:
-	message, err := schema.ConcatMessageStream(stream)
-	if err != nil {
-		cancel()
-		if callbackErr := r.waitTraceCallbacks(); callbackErr != nil {
-			log.Printf("failed to collect Eino callback trace: %v", callbackErr)
-		}
-		log.Printf("failed to stream Eino ReAct agent: %v", err)
-		return nil, err
+	compacted := r.reactiveCompactHistory(ctx, r.contextBuilder(), cloneMessages(r.agent.messages))
+	r.agent.messages = compacted
+	iter, startErr := r.startADKRun(ctx, compacted)
+	if startErr != nil {
+		return nil, startErr
 	}
-	if err := r.waitTraceCallbacks(); err != nil {
-		return nil, err
-	}
-	if err := r.modelCallError(); err != nil {
-		return nil, err
-	}
-	return message, nil
+	return r.consumeADKEvents(ctx, iter)
 }
 
 func (r *einoAgentRun) RetryIgnoredToolPolicy(ctx context.Context) bool {
@@ -412,6 +404,9 @@ func observedMessageKey(message *schema.Message) string {
 
 func (r *einoAgentRun) recordAssistantMessage(ctx context.Context, message *schema.Message) error {
 	policy := r.nextRequiredToolPolicy()
+	if r.runCtx != nil && message.ResponseMeta != nil {
+		r.runCtx.recordModelUsage(message.ResponseMeta.Usage)
+	}
 
 	r.mu.Lock()
 	for _, call := range message.ToolCalls {
@@ -519,6 +514,38 @@ func (r *einoAgentRun) toolCallMiddleware() compose.ToolMiddleware {
 	return compose.ToolMiddleware{
 		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+				startedAt := time.Now()
+				approvedArguments, approvalOutput, handled, err := r.gateToolCall(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				if handled {
+					if approvalOutput != nil {
+						call := schema.ToolCall{
+							ID: input.CallID,
+							Function: schema.FunctionCall{
+								Name:      input.Name,
+								Arguments: input.Arguments,
+							},
+						}
+						toolResult := limitToolResult(ToolResult{
+							Call:       call,
+							Content:    approvalOutput.Result,
+							StartedAt:  startedAt,
+							FinishedAt: time.Now(),
+						})
+						r.rememberToolResult(toolResult)
+						if r.runCtx != nil {
+							r.runCtx.recordToolResult(toolResult)
+						}
+					}
+					return approvalOutput, nil
+				}
+				if approvedArguments != "" && approvedArguments != input.Arguments {
+					cloned := *input
+					cloned.Arguments = approvedArguments
+					input = &cloned
+				}
 				call := schema.ToolCall{
 					ID: input.CallID,
 					Function: schema.FunctionCall{
@@ -529,9 +556,11 @@ func (r *einoAgentRun) toolCallMiddleware() compose.ToolMiddleware {
 				if r.runCtx != nil {
 					if err := r.runCtx.reserveToolCall(tool.AgentTool(input.Name)); err != nil {
 						toolResult := ToolResult{
-							Call:    call,
-							Content: budgetExceededToolContent(err),
-							Err:     err,
+							Call:       call,
+							Content:    budgetExceededToolContent(err),
+							Err:        err,
+							StartedAt:  startedAt,
+							FinishedAt: time.Now(),
 						}
 						toolResult = limitToolResult(toolResult)
 						r.rememberToolResult(toolResult)
@@ -541,9 +570,11 @@ func (r *einoAgentRun) toolCallMiddleware() compose.ToolMiddleware {
 				}
 				if err := r.agent.hooks.BeforeToolCall(ctx, r.runCtx, &call); err != nil {
 					toolResult := ToolResult{
-						Call:    call,
-						Content: err.Error(),
-						Err:     err,
+						Call:       call,
+						Content:    err.Error(),
+						Err:        err,
+						StartedAt:  startedAt,
+						FinishedAt: time.Now(),
 					}
 					toolResult = limitToolResult(toolResult)
 					r.rememberToolResult(toolResult)
@@ -562,15 +593,18 @@ func (r *einoAgentRun) toolCallMiddleware() compose.ToolMiddleware {
 					content = err.Error()
 				}
 				toolResult := ToolResult{
-					Call:    call,
-					Content: content,
-					Err:     err,
+					Call:       call,
+					Content:    content,
+					Err:        err,
+					StartedAt:  startedAt,
+					FinishedAt: time.Now(),
 				}
 
 				if err := r.agent.hooks.AfterToolCall(ctx, r.runCtx, &toolResult); err != nil {
 					toolResult.Err = err
 					toolResult.Content = err.Error()
 				}
+				toolResult.FinishedAt = time.Now()
 				toolResult = limitToolResult(toolResult)
 				r.rememberToolResult(toolResult)
 				if r.runCtx != nil {

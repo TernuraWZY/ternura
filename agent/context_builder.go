@@ -466,6 +466,12 @@ func cloneMessages(messages []*schema.Message) []*schema.Message {
 		if len(message.ToolCalls) > 0 {
 			item.ToolCalls = append([]schema.ToolCall(nil), message.ToolCalls...)
 		}
+		if len(message.UserInputMultiContent) > 0 {
+			item.UserInputMultiContent = append([]schema.MessageInputPart(nil), message.UserInputMultiContent...)
+		}
+		if len(message.AssistantGenMultiContent) > 0 {
+			item.AssistantGenMultiContent = append([]schema.MessageOutputPart(nil), message.AssistantGenMultiContent...)
+		}
 		cloned[idx] = &item
 	}
 	return cloned

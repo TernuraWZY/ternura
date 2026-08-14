@@ -86,6 +86,116 @@ func TestRunWithTraceUsesEinoReactToolLoop(t *testing.T) {
 	}
 }
 
+func TestRunMessageWithTracePreservesEinoMultimodalInput(t *testing.T) {
+	t.Parallel()
+
+	model := &scriptedChatModel{}
+	imageURL := "https://example.com/image.png"
+	model.generate = func(_ int, input []*schema.Message, _ ...einomodel.Option) (*schema.Message, error) {
+		for _, message := range input {
+			if message.Role != schema.User || len(message.UserInputMultiContent) != 2 {
+				continue
+			}
+			if message.UserInputMultiContent[1].Image == nil || message.UserInputMultiContent[1].Image.URL == nil || *message.UserInputMultiContent[1].Image.URL != imageURL {
+				t.Fatalf("image input was not preserved: %+v", message.UserInputMultiContent)
+			}
+			return schema.AssistantMessage("described", nil), nil
+		}
+		t.Fatalf("multimodal user message missing: %+v", input)
+		return nil, nil
+	}
+
+	a := NewAgent(testModelConfig(), "system", nil)
+	a.chatModel = model
+	result, err := a.RunMessageWithTrace(context.Background(), &schema.Message{
+		Role: schema.User,
+		UserInputMultiContent: []schema.MessageInputPart{
+			{Type: schema.ChatMessagePartTypeText, Text: "describe this"},
+			{
+				Type: schema.ChatMessagePartTypeImageURL,
+				Image: &schema.MessageInputImage{MessagePartCommon: schema.MessagePartCommon{
+					URL: &imageURL,
+				}},
+			},
+		},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "described" {
+		t.Fatalf("content = %q", result.Content)
+	}
+}
+
+func TestRunWithTraceCheckpointResumesApprovedToolCall(t *testing.T) {
+	fakeTool := &fakeAgentTool{
+		name:   tool.AgentToolBash,
+		result: "command ok",
+	}
+	model := &scriptedChatModel{}
+	model.generate = func(call int, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
+		switch call {
+		case 1:
+			return schema.AssistantMessage("", []schema.ToolCall{{
+				ID: "call-approval",
+				Function: schema.FunctionCall{
+					Name:      string(tool.AgentToolBash),
+					Arguments: `{"command":"echo approved"}`,
+				},
+			}}), nil
+		case 2:
+			if !containsToolMessage(input, "call-approval", "command ok") {
+				t.Fatalf("resume input missing approved tool result: %+v", input)
+			}
+			return schema.AssistantMessage("approved done", nil), nil
+		default:
+			t.Fatalf("unexpected generate call %d", call)
+			return nil, nil
+		}
+	}
+
+	checkpointStore := NewFileCheckPointStore(t.TempDir())
+	agent := NewAgent(
+		testModelConfig(),
+		"system",
+		[]tool.Tool{fakeTool},
+		WithCheckpointStore(checkpointStore),
+		WithToolApprovalPolicy(ToolApprovalPolicy{Mode: ToolApprovalSideEffects, WorkspaceRoot: t.TempDir()}),
+	)
+	agent.chatModel = model
+
+	result, err := agent.RunWithTraceCheckpoint(context.Background(), "run a command", "run-approval")
+	if err != nil {
+		t.Fatalf("run with approval: %v", err)
+	}
+	if result.PendingApproval == nil || result.PendingApproval.InterruptID == "" {
+		t.Fatalf("pending approval = %+v", result.PendingApproval)
+	}
+	if len(fakeTool.calls) != 0 {
+		t.Fatalf("tool executed before approval: %+v", fakeTool.calls)
+	}
+	if _, found, err := checkpointStore.Get(context.Background(), "run-approval"); err != nil || !found {
+		t.Fatalf("checkpoint missing: found=%v err=%v", found, err)
+	}
+
+	resumed, err := agent.ResumeWithTrace(
+		context.Background(),
+		"run a command",
+		"run-approval",
+		result.PendingApproval.InterruptID,
+		ToolApprovalDecision{Approved: true},
+	)
+	if err != nil {
+		t.Fatalf("resume approved tool: %v", err)
+	}
+	if resumed.Content != "approved done" {
+		t.Fatalf("resumed content = %q", resumed.Content)
+	}
+	if len(fakeTool.calls) != 1 || fakeTool.calls[0] != `{"command":"echo approved"}` {
+		t.Fatalf("approved tool calls = %+v", fakeTool.calls)
+	}
+}
+
 func TestRunWithTraceRetriesWhenFinalizeRequiresTool(t *testing.T) {
 	fakeTool := &fakeAgentTool{
 		name:   tool.AgentTool("fake_tool"),
@@ -467,6 +577,8 @@ func (m *scriptedChatModel) WithTools(tools []*schema.ToolInfo) (einomodel.ToolC
 
 func (m *scriptedChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
 	m.generateCalls++
+	options := einomodel.GetCommonOptions(&einomodel.Options{}, opts...)
+	m.boundTools = append([]*schema.ToolInfo(nil), options.Tools...)
 	if m.generate == nil {
 		return nil, errors.New("unexpected Generate call")
 	}
@@ -475,6 +587,8 @@ func (m *scriptedChatModel) Generate(ctx context.Context, input []*schema.Messag
 
 func (m *scriptedChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
 	m.streamCalls++
+	options := einomodel.GetCommonOptions(&einomodel.Options{}, opts...)
+	m.boundTools = append([]*schema.ToolInfo(nil), options.Tools...)
 	if m.stream == nil {
 		return nil, errors.New("unexpected Stream call")
 	}

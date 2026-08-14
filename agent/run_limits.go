@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	defaultMaxReactSteps    = 24
-	defaultMaxModelCalls    = 16
-	defaultMaxToolCalls     = 12
-	defaultMaxWebFetchCalls = 5
+	defaultMaxReactSteps     = 24
+	defaultMaxModelCalls     = 16
+	defaultMaxToolCalls      = 12
+	defaultMaxWebSearchCalls = 3
+	defaultMaxWebFetchCalls  = 5
 )
 
 var ErrRunBudgetExceeded = errors.New("run budget exceeded")
@@ -56,7 +57,8 @@ func DefaultRunLimits() RunLimits {
 		MaxModelCalls: defaultMaxModelCalls,
 		MaxToolCalls:  defaultMaxToolCalls,
 		MaxToolCallsByName: map[tool.AgentTool]int{
-			tool.AgentToolWebFetch: defaultMaxWebFetchCalls,
+			tool.AgentToolWebSearch: defaultMaxWebSearchCalls,
+			tool.AgentToolWebFetch:  defaultMaxWebFetchCalls,
 		},
 	}
 }
@@ -68,9 +70,11 @@ func RunLimitsFromEnv() RunLimits {
 	limits.MaxToolCalls = envInt("TERNURA_MAX_TOOL_CALLS", limits.MaxToolCalls)
 
 	webFetchLimit := envInt("TERNURA_MAX_WEB_FETCH_CALLS", defaultMaxWebFetchCalls)
+	webSearchLimit := envInt("TERNURA_MAX_WEB_SEARCH_CALLS", defaultMaxWebSearchCalls)
 	if limits.MaxToolCallsByName == nil {
 		limits.MaxToolCallsByName = make(map[tool.AgentTool]int)
 	}
+	limits.MaxToolCallsByName[tool.AgentToolWebSearch] = webSearchLimit
 	limits.MaxToolCallsByName[tool.AgentToolWebFetch] = webFetchLimit
 	return normalizeRunLimits(limits)
 }

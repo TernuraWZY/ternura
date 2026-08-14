@@ -27,6 +27,9 @@ func (s *agentServer) handleFeishuMessage(ctx context.Context, msg feishu.Inboun
 	}
 
 	session := s.newAgentSession(sessionID, nil)
+	if command, ok := parseApprovalCommand(msg.Content); ok {
+		return formatFeishuOutcome(session.resumeApproval(ctx, msg.Content, command))
+	}
 
 	if result, handled, err := s.tryScheduleShortcutForSession(ctx, msg.Content, sessionID, delivery); handled {
 		outcome := session.run(ctx, agentSessionRunRequest{

@@ -30,6 +30,7 @@ func TestAppSkillRegistryBuildsDefaultCapabilities(t *testing.T) {
 		tool.AgentToolRemember,
 		tool.AgentToolForgetMemory,
 		tool.AgentToolCron,
+		tool.AgentToolWebSearch,
 		tool.AgentToolWebFetch,
 	} {
 		if _, ok := toolNames[want]; !ok {

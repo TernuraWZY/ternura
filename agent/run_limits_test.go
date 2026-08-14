@@ -33,6 +33,13 @@ func TestRunContextEnforcesNamedToolBudget(t *testing.T) {
 	}
 }
 
+func TestDefaultRunLimitsIncludeWebSearchBudget(t *testing.T) {
+	limits := DefaultRunLimits()
+	if got := limits.MaxToolCallsByName[tool.AgentToolWebSearch]; got != defaultMaxWebSearchCalls {
+		t.Fatalf("web_search limit = %d, want %d", got, defaultMaxWebSearchCalls)
+	}
+}
+
 func TestRunContextEnforcesTotalToolBudget(t *testing.T) {
 	run := NewRunContext("tools", RunModeSync)
 	run.SetRunLimits(RunLimits{MaxReactSteps: 10, MaxToolCalls: 1})

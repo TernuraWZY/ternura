@@ -1,0 +1,19 @@
+{
+  "servers": {
+    "filesystem": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "${HOME}/Desktop"],
+      "require_approval": true
+    },
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_TOKEN}"
+      },
+      "tools": ["search"],
+      "require_approval": false
+    }
+  }
+}

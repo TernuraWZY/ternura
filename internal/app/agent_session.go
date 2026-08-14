@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"time"
@@ -47,7 +48,11 @@ func (s *agentServer) newAgentSession(sessionID string, cronTool *tool.CronTool)
 }
 
 func (s *agentSession) agent() *agent.Agent {
-	sessionAgent := newAgentFromSkillRegistry(s.server.modelConf, s.server.newSkillRegistry(s.sessionID, s.cronTool))
+	sessionAgent := newAgentFromSkillRegistry(
+		s.server.modelConf,
+		s.server.newSkillRegistry(s.sessionID, s.cronTool),
+		agent.WithCheckpointStore(s.server.checkpoints),
+	)
 
 	snapshot := s.server.store.Snapshot()
 	if session := findSession(snapshot.Sessions, s.sessionID); session != nil && len(session.Messages) > 0 {
@@ -56,8 +61,8 @@ func (s *agentSession) agent() *agent.Agent {
 	return sessionAgent
 }
 
-func (s *agentSession) runWithTrace(ctx context.Context, runtimePrompt string) (agent.AgentRunResult, error) {
-	return s.agent().RunWithTrace(ctx, runtimePrompt)
+func (s *agentSession) runWithTrace(ctx context.Context, runtimePrompt string, checkpointID string) (agent.AgentRunResult, error) {
+	return s.agent().RunWithTraceCheckpoint(ctx, runtimePrompt, checkpointID)
 }
 
 func (s *agentSession) run(ctx context.Context, request agentSessionRunRequest) agentSessionRunOutcome {
@@ -72,7 +77,7 @@ func (s *agentSession) run(ctx context.Context, request agentSessionRunRequest) 
 	if request.DirectResult != nil {
 		result = *request.DirectResult
 	} else {
-		result, runErr = s.runWithTrace(ctx, request.RuntimePrompt)
+		result, runErr = s.runWithTrace(ctx, request.RuntimePrompt, run.ID)
 	}
 	if runErr != nil {
 		result = failedAgentRunResult(result, runErr)
@@ -163,10 +168,7 @@ func (s *agentSession) startScheduledRun(displayPrompt string) (runLifecycle, er
 
 func (s *agentSession) finishUserRun(run runLifecycle, message string, result agent.AgentRunResult, runErr error) {
 	finished := time.Now()
-	status := runStatusSucceeded
-	if runErr != nil {
-		status = runStatusFailed
-	}
+	status := agentRunStatus(result, runErr)
 	logRunFinish(run, status, finished)
 	if err := s.server.store.FinishRunForSession(s.sessionID, run, message, result, status, finished, runErr); err != nil {
 		log.Printf("persist run %s: %v", run.ID, err)
@@ -183,12 +185,22 @@ func (s *agentSession) finishUserRunWithoutMessages(run runLifecycle, message st
 
 func (s *agentSession) finishScheduledRun(run runLifecycle, displayPrompt string, runtimePrompt string, result agent.AgentRunResult, runErr error) {
 	finished := time.Now()
-	status := runStatusSucceeded
-	if runErr != nil {
-		status = runStatusFailed
-	}
+	status := agentRunStatus(result, runErr)
 	logRunFinish(run, status, finished)
 	if err := s.server.store.FinishScheduledRunForSession(s.sessionID, run, displayPrompt, runtimePrompt, result, status, finished, runErr); err != nil {
 		log.Printf("persist cron run %s: %v", run.ID, err)
 	}
+}
+
+func agentRunStatus(result agent.AgentRunResult, runErr error) string {
+	if errors.Is(runErr, context.Canceled) {
+		return runStatusCancelled
+	}
+	if runErr != nil {
+		return runStatusFailed
+	}
+	if result.PendingApproval != nil {
+		return runStatusWaitingApproval
+	}
+	return runStatusSucceeded
 }

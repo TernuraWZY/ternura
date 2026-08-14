@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	stdhtml "html"
 	"io"
 	"mime"
 	"net/http"
@@ -14,22 +15,23 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	readability "codeberg.org/readeck/go-readability/v2"
 )
 
 const (
 	defaultWebFetchMaxChars     = 5000
 	maxWebFetchMaxChars         = 12000
-	maxWebFetchReadBytes        = 512 * 1024
+	maxWebFetchReadBytes        = 2 * 1024 * 1024
 	maxWebFetchFailureReadBytes = 16 * 1024
 	defaultWebFetchTimeout      = 8 * time.Second
 )
 
 var (
-	htmlScriptPattern     = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`)
-	htmlStylePattern      = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
-	htmlNoscriptPattern   = regexp.MustCompile(`(?is)<noscript\b[^>]*>.*?</noscript>`)
-	htmlTagPattern        = regexp.MustCompile(`(?s)<[^>]+>`)
-	htmlWhitespacePattern = regexp.MustCompile(`[ \t\r\n]+`)
+	htmlScriptPattern   = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`)
+	htmlStylePattern    = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
+	htmlNoscriptPattern = regexp.MustCompile(`(?is)<noscript\b[^>]*>.*?</noscript>`)
+	htmlTagPattern      = regexp.MustCompile(`(?s)<[^>]+>`)
 )
 
 type WebFetchTool struct {
@@ -95,7 +97,8 @@ func (t *WebFetchTool) run(ctx context.Context, params WebFetchParam) (string, e
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	text := webFetchBodyToText(body, contentType)
+	page := extractWebPage(body, contentType, resp.Request.URL)
+	text := page.Text
 	failureReason := ""
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		failureReason = fmt.Sprintf("non-success HTTP status %s; do not use this page as factual evidence", resp.Status)
@@ -111,6 +114,11 @@ func (t *WebFetchTool) run(ctx context.Context, params WebFetchParam) (string, e
 		ContentType:   contentType,
 		FinalURL:      resp.Request.URL.String(),
 		Body:          text,
+		Title:         page.Title,
+		Byline:        page.Byline,
+		SiteName:      page.SiteName,
+		PublishedTime: page.PublishedTime,
+		Extraction:    page.Extraction,
 		ReadTruncated: truncatedRead,
 		TextTruncated: truncatedText,
 		FailureReason: failureReason,
@@ -123,6 +131,11 @@ type webFetchOutput struct {
 	ContentType   string
 	FinalURL      string
 	Body          string
+	Title         string
+	Byline        string
+	SiteName      string
+	PublishedTime string
+	Extraction    string
 	ReadTruncated bool
 	TextTruncated bool
 	FailureReason string
@@ -201,12 +214,44 @@ func containsAny(value string, needles ...string) bool {
 	return false
 }
 
-func webFetchBodyToText(body []byte, contentType string) string {
+type extractedWebPage struct {
+	Text          string
+	Title         string
+	Byline        string
+	SiteName      string
+	PublishedTime string
+	Extraction    string
+}
+
+func extractWebPage(body []byte, contentType string, pageURL *url.URL) extractedWebPage {
 	mediaType, _, _ := mime.ParseMediaType(contentType)
 	if strings.Contains(mediaType, "html") || looksLikeHTML(body) {
-		return htmlToReadableText(body)
+		if article, err := readability.FromReader(bytes.NewReader(body), pageURL); err == nil && article.Node != nil {
+			var rendered strings.Builder
+			if err := article.RenderText(&rendered); err == nil {
+				text := normalizeReadableText(rendered.String())
+				if utf8.RuneCountInString(text) >= 80 {
+					publishedTime := ""
+					if published, err := article.PublishedTime(); err == nil {
+						publishedTime = published.Format(time.RFC3339)
+					}
+					return extractedWebPage{
+						Text:          text,
+						Title:         strings.TrimSpace(article.Title()),
+						Byline:        strings.TrimSpace(article.Byline()),
+						SiteName:      strings.TrimSpace(article.SiteName()),
+						PublishedTime: publishedTime,
+						Extraction:    "readability",
+					}
+				}
+			}
+		}
+		return extractedWebPage{Text: htmlToReadableText(body), Extraction: "fallback"}
 	}
-	return strings.TrimSpace(string(bytes.ToValidUTF8(body, []byte(" "))))
+	return extractedWebPage{
+		Text:       strings.TrimSpace(string(bytes.ToValidUTF8(body, []byte(" ")))),
+		Extraction: "plain_text",
+	}
 }
 
 func looksLikeHTML(body []byte) bool {
@@ -226,16 +271,30 @@ func htmlToReadableText(body []byte) string {
 		"</p>", "\n",
 		"</div>", "\n",
 		"</li>", "\n",
-		"&nbsp;", " ",
-		"&amp;", "&",
-		"&lt;", "<",
-		"&gt;", ">",
-		"&quot;", `"`,
-		"&#39;", "'",
 	).Replace(text)
 	text = htmlTagPattern.ReplaceAllString(text, " ")
-	text = htmlWhitespacePattern.ReplaceAllString(text, " ")
-	return strings.TrimSpace(text)
+	text = stdhtml.UnescapeString(text)
+	return strings.Join(strings.Fields(text), " ")
+}
+
+func normalizeReadableText(text string) string {
+	text = string(bytes.ToValidUTF8([]byte(text), []byte(" ")))
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	cleaned := make([]string, 0, len(lines))
+	blank := false
+	for _, line := range lines {
+		line = strings.Join(strings.Fields(line), " ")
+		if line == "" {
+			if len(cleaned) > 0 && !blank {
+				cleaned = append(cleaned, "")
+				blank = true
+			}
+			continue
+		}
+		cleaned = append(cleaned, line)
+		blank = false
+	}
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
 }
 
 func trimWebFetchText(text string, maxChars int) (string, bool) {
@@ -259,6 +318,21 @@ func formatWebFetchOutput(output webFetchOutput) string {
 	fmt.Fprintf(&b, "Status: %s\n", output.Status)
 	if output.ContentType != "" {
 		fmt.Fprintf(&b, "Content-Type: %s\n", output.ContentType)
+	}
+	if output.Extraction != "" {
+		fmt.Fprintf(&b, "Extraction: %s\n", output.Extraction)
+	}
+	if output.Title != "" {
+		fmt.Fprintf(&b, "Title: %s\n", output.Title)
+	}
+	if output.Byline != "" {
+		fmt.Fprintf(&b, "Byline: %s\n", output.Byline)
+	}
+	if output.SiteName != "" {
+		fmt.Fprintf(&b, "Site: %s\n", output.SiteName)
+	}
+	if output.PublishedTime != "" {
+		fmt.Fprintf(&b, "Published: %s\n", output.PublishedTime)
 	}
 	if output.FailureReason != "" {
 		fmt.Fprintf(&b, "Usable: false\nFailure reason: %s\n", output.FailureReason)

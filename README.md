@@ -10,7 +10,12 @@ Ternura 是一个完整、独立的轻量级通用 Agent 项目。它使用 Go �
 
 ## 功能
 
-- 基于 Eino ChatModel 的 OpenAI 兼容模型客户端
+- 基于 Eino ADK ChatModelAgent 的 OpenAI 兼容模型客户端和原生 ReAct 编排
+- 支持 Eino checkpoint/interrupt：高风险工具暂停后可由飞书或 Task API 审批并恢复
+- 支持并行工具调用、模型重试、可选 fallback model 和大工具集动态 `tool_search`
+- 支持 MCP `stdio` / Streamable HTTP 服务，远端工具直接注册为 Eino 原生 Tool
+- 支持异步 Task、取消、Artifact、结构化 trace/metrics 和 JSONL Eval
+- Agent 核心可直接接收 Eino 多模态 `schema.Message`，供图片、音频、视频和文件 Channel adapter 使用
 - 支持 MiniMax 中国区配置
 - System Prompt 定位为通用工具型 Agent，不再限制为 coding assistant
 - 支持连续对话上下文
@@ -20,7 +25,7 @@ Ternura 是一个完整、独立的轻量级通用 Agent 项目。它使用 Go �
 - 提供 Hook 扩展模块，可在 run、模型调用和工具调用生命周期中注入上下文、禁用工具、拦截工具和记录结果
 - 内置运行时上下文 Hook：每轮注入当前时间和时区，并在识别到提醒或取消提醒意图时注入调度工具使用规范
 - 内置轻量状态归因 Guard：防止模型把伪工具调用、未执行的命令、文件写入或记忆变更说成真实结果
-- 内置 `read`、`write`、`edit`、`bash`、`update_todos`、`compact`、`remember`、`forget_memory`、`cron` 和 `web_fetch` 工具
+- 内置 `read`、`write`、`edit`、`bash`、`update_todos`、`compact`、`remember`、`forget_memory`、`cron`、`web_search` 和 `web_fetch` 工具
 - 支持短期记忆和长期记忆：短期记忆按 session 自动滚动更新，长期记忆通过工具显式写入和删除，并在模型调用前通过 Active Memory 按需召回
 - 提供命令行入口
 - 提供后台 daemon，负责飞书事件、HTTP 回调、health check 和 cron runner
@@ -90,14 +95,27 @@ FEISHU_REPLY_TIMEOUT=15s
 TERNURA_MAX_REACT_STEPS=24
 TERNURA_MAX_MODEL_CALLS=16
 TERNURA_MAX_TOOL_CALLS=12
+TERNURA_MAX_WEB_SEARCH_CALLS=3
 TERNURA_MAX_WEB_FETCH_CALLS=5
+TERNURA_WEB_SEARCH_TIMEOUT=8s
 TERNURA_WEB_FETCH_TIMEOUT=8s
 TERNURA_WEB_FETCH_MAX_CHARS=5000
+TERNURA_PARALLEL_TOOL_CALLS=true
+TERNURA_MODEL_MAX_RETRIES=2
+TERNURA_DYNAMIC_TOOL_SEARCH=auto
+TERNURA_DYNAMIC_TOOL_SEARCH_THRESHOLD=16
+TERNURA_TOOL_APPROVAL_MODE=dangerous
 ```
 
-这些默认值用于防止单轮交互在工具调用和网页抓取之间无限拉长。`web_fetch` 现在会对搜索结果页、验证码/反爬页面和非 2xx HTTP 响应快速标记为不可用证据；达到抓取上限时会提示“没有 fetch 到更多有效网页信息”，模型应基于已有证据停止探索并说明未验证部分。
+这些默认值用于防止单轮交互在网页搜索和抓取之间无限拉长。`web_search` 默认通过 DuckDuckGo HTML 做无 Key 搜索，结果摘要只用于发现来源；Agent 应继续用 `web_fetch` 读取原始页面后再形成事实结论。`web_fetch` 会优先用 Readability 提取正文和元数据，并对搜索结果页、验证码/反爬页面和非 2xx HTTP 响应快速标记为不可用证据。
 
 飞书回复发送使用独立的 `FEISHU_REPLY_TIMEOUT`，即使 Agent 本轮达到 `TERNURA_AGENT_TURN_TIMEOUT`，也会尝试向飞书客户端发送一条可见的超时说明，而不是静默失败。
+
+`TERNURA_TOOL_APPROVAL_MODE` 支持 `none`、`dangerous`、`side_effects` 和 `all`。默认 `dangerous` 只暂停破坏性 shell、工作区外文件修改，以及配置为需审批的 MCP 工具。飞书中回复 `approve run-...` 或 `reject run-... 原因` 后，Eino 会从原 checkpoint 恢复，不会重新执行已经完成的步骤。
+
+主模型瞬时失败会按 `TERNURA_MODEL_MAX_RETRIES` 重试。配置 `TERNURA_FALLBACK_MODEL` 后还会启用 Eino ADK 原生模型故障转移；`TERNURA_FALLBACK_BASE_URL` 和 `TERNURA_FALLBACK_API_KEY` 未填写时沿用主模型连接配置。
+
+工具数量默认达到 16 个才开启 Eino `tool_search`，少量工具仍一次性直接提供给模型。可以用 `TERNURA_DYNAMIC_TOOL_SEARCH=enabled|disabled|auto` 明确覆盖该行为。
 
 如果模型把 MiniMax 风格的 `<invoke name="...">` / `</minimax:tool_call>` 工具调用标记作为普通文本吐出，grounding guard 会拦截这类伪工具调用，不会把它直接发给用户；如果还有预算，会强制重试并要求真正调用对应工具。
 
@@ -131,6 +149,20 @@ GOCACHE=$PWD/.gocache go run ./cmd/ternura -q "请读取 README.md 并总结项�
 GOCACHE=$PWD/.gocache go run ./cmd/ternura -q "在当前目录下创建一个 TODO.md，内容为 1. 研究 agent"
 ```
 
+运行可重复 Eval：
+
+```bash
+GOCACHE=$PWD/.gocache go run ./cmd/ternura -eval eval.example.jsonl
+```
+
+每行是一个独立用例，支持 `expect_contains`、`expect_not_contains`、`require_tools`、`max_model_calls`、`max_tool_calls` 和 `timeout_seconds` 断言。每个用例使用全新对话，结果以 JSON 汇总输出。
+
+## MCP
+
+设置 `TERNURA_MCP_CONFIG` 指向 MCP 配置文件，默认读取 `.ternura/mcp.json`。仓库中的 `mcp.example.json` 展示了 `stdio` 和 Streamable HTTP 两种配置；`${ENV_NAME}` 会在启动时从环境变量展开。
+
+MCP 工具以 `mcp_<server>_<tool>` 暴露给模型，避免多服务同名冲突。`require_approval` 默认为 `true`；明确只读的 MCP 服务可以设置为 `false`。某个 MCP 服务连接失败只会记录错误，不会阻止其他服务和主 Agent 启动。
+
 ## 运行后台服务
 
 启动 daemon：
@@ -144,6 +176,7 @@ daemon 会启动：
 - 飞书 WebSocket 长连接，或者 HTTP 事件回调 `/api/feishu/events`
 - 后台 cron runner，到点后恢复对应 session 并执行 Agent
 - 健康检查接口 `/healthz`
+- 本地异步任务接口 `/api/tasks` 和能力描述 `/api/agent-card`
 
 本地监听地址默认是 `:8080`，可以通过 `-addr` 修改：
 
@@ -153,6 +186,16 @@ GOCACHE=$PWD/.gocache go run ./cmd/ternura -serve -addr :8081
 
 Ternura 不再内置浏览器查看页面。运行历史、trace、memory 和 cron 状态仍然会结构化落盘，后续可以通过日志、CLI、外部 channel 或独立观测工具读取。
 
+异步提交任务：
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"读取 README.md 并总结"}'
+```
+
+随后可用 `GET /api/tasks/<run_id>` 查询，`POST /api/tasks/<run_id>/cancel` 取消，或向等待审批的任务发送 `POST /api/tasks/<run_id>/decision`，body 为 `{"approved":true}`。未设置 `TERNURA_API_TOKEN` 时 Task API 只接受 loopback 请求；设置后必须携带 `Authorization: Bearer <token>`。
+
 会话恢复数据保存在项目根目录的 `.ternura/`，并拆成多个文件：
 
 ```text
@@ -160,6 +203,8 @@ Ternura 不再内置浏览器查看页面。运行历史、trace、memory 和 cr
 ├── index.json
 ├── cron/
 │   └── jobs.json
+├── checkpoints/
+│   └── *.checkpoint
 ├── memory/
 │   └── long_term.json
 └── sessions/
@@ -180,7 +225,8 @@ Ternura 不再内置浏览器查看页面。运行历史、trace、memory 和 cr
 - `meta.json`：单个 session 的元信息和 run 顺序
 - `messages.json`：用于服务重启后恢复模型上下文的 user/assistant 对话历史
 - `todos.json`：当前 session 的任务计划，由 `update_todos` 工具维护
-- `runs/*.json`：每轮请求的详细记录，包括 `run_id`、状态、用户输入、最终回复、原始回复、trace、错误信息和耗时
+- `runs/*.json`：每轮请求的详细记录，包括 `run_id`、状态、用户输入、最终回复、Artifact、模型/工具指标、结构化 trace、错误信息和耗时
+- `checkpoints/*.checkpoint`：Eino interrupt 的可恢复运行状态，文件名使用 checkpoint id 哈希
 
 旧版 `.ternura/session.json` 会在启动时自动迁移到拆分结构，并移动为 `.ternura/session.legacy.json` 作为备份；后续写入只更新拆分后的文件。
 
@@ -210,11 +256,13 @@ Harness 还会执行轻量工具证据校验：最终回复返回前，`Tool gro
 go run ./cmd/ternura -q "prompt text"
 go run ./cmd/ternura -serve
 go run ./cmd/ternura -serve -addr :8081
+go run ./cmd/ternura -eval eval.example.jsonl
 ```
 
 - `-q`：CLI 模式下的用户输入
 - `-serve`：启动后台 daemon
 - `-addr`：HTTP 回调和 health check 监听地址，默认是 `:8080`
+- `-eval`：运行 JSONL Agent 回归评测，不启动 daemon
 
 ## 目录结构
 
@@ -353,7 +401,8 @@ type Tool interface {
 - `remember`：写入长期记忆，支持 `preference`、`profile`、`project`、`instruction`、`fact` 和 `other` 分类
 - `forget_memory`：按 memory id 删除长期记忆
 - `cron`：创建、列出和删除定时任务；相对时间使用 `delay_seconds`，绝对时间使用 ISO datetime `at`，循环任务使用 `every_seconds` 或 `cron_expr`
-- `web_fetch`：通过本机网络读取指定 HTTP/HTTPS URL，返回状态、最终 URL、内容类型和裁剪后的可读文本
+- `web_search`：通过 DuckDuckGo HTML 做无 API Key 的公开网页搜索，返回标题、原始 URL 和摘要；摘要只用于发现来源
+- `web_fetch`：通过本机网络读取指定 HTTP/HTTPS URL，优先用 Readability 提取正文、标题、作者、站点和发布时间，失败时回退到通用文本提取
 
 ## Provider 选择
 
@@ -385,7 +434,7 @@ Ternura 当前已经具备基本的 Agent loop、工具调用、trace 记录、�
 - [x] 计划与步骤状态：提供 `update_todos` 工具，把当前 session 的任务步骤持久化
 - [x] Skill 模块：提供 `SkillRegistry`，把工具、Hook 和运行时说明按能力模块统一装配
 - [x] Hook 扩展模块：提供 `RunContext` 和 run/model/tool 生命周期 Hook，支持后续记忆、权限、审计和预算模块接入
-- [x] 运行预算与工具熔断：限制 ReAct 步数、模型调用数、工具调用数和 `web_fetch` 次数；网页抓取遇到搜索页、验证码、反爬或非 2xx 响应时快速返回不可用证据
+- [x] 运行预算与工具熔断：限制 ReAct 步数、模型调用数、工具调用数、`web_search` 和 `web_fetch` 次数；网页抓取遇到搜索页、验证码、反爬或非 2xx 响应时快速返回不可用证据
 - [x] 状态归因保护：在最终回复返回前校验真实工具结果和持久化状态，防止模型编造 schedule id 或虚假宣称副作用成功
 - [x] 工具证据保护：最终回复会拦截伪工具调用文本，以及缺少本轮工具证据的命令执行、安装、文件修改和记忆变更等副作用声明
 - [x] 定时任务：提供 `cron` 工具和后台 runner，支持 one-shot、interval 和 cron-like schedule，到点后恢复 session 上下文并执行 Agent

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 
@@ -63,13 +64,18 @@ type RunContext struct {
 	ToolCallCount  int
 	Metadata       map[string]any
 
-	contextBlocks  []RuntimeContextBlock
-	disabledTools  map[tool.AgentTool]string
-	toolResults    []ToolExecution
-	toolPolicy     ToolPolicy
-	toolPolicyMu   sync.RWMutex
-	runLimits      RunLimits
-	toolCallCounts map[tool.AgentTool]int
+	contextBlocks    []RuntimeContextBlock
+	disabledTools    map[tool.AgentTool]string
+	toolResults      []ToolExecution
+	toolPolicy       ToolPolicy
+	toolPolicyMu     sync.RWMutex
+	budgetMu         sync.RWMutex
+	stateMu          sync.RWMutex
+	runLimits        RunLimits
+	toolCallCounts   map[tool.AgentTool]int
+	promptTokens     int
+	completionTokens int
+	totalTokens      int
 }
 
 func NewRunContext(query string, mode RunMode) *RunContext {
@@ -85,6 +91,8 @@ func (r *RunContext) SetRunLimits(limits RunLimits) {
 	if r == nil {
 		return
 	}
+	r.budgetMu.Lock()
+	defer r.budgetMu.Unlock()
 	r.runLimits = normalizeRunLimits(limits)
 	if r.toolCallCounts == nil {
 		r.toolCallCounts = make(map[tool.AgentTool]int)
@@ -95,6 +103,8 @@ func (r *RunContext) RunLimits() RunLimits {
 	if r == nil {
 		return RunLimits{}
 	}
+	r.budgetMu.RLock()
+	defer r.budgetMu.RUnlock()
 	return r.runLimits
 }
 
@@ -102,6 +112,8 @@ func (r *RunContext) reserveModelCall() error {
 	if r == nil {
 		return nil
 	}
+	r.budgetMu.Lock()
+	defer r.budgetMu.Unlock()
 	limit := r.runLimits.MaxModelCalls
 	if limit > 0 && r.ModelCallCount >= limit {
 		return RunBudgetError{Kind: "model", Limit: limit}
@@ -114,6 +126,8 @@ func (r *RunContext) reserveToolCall(name tool.AgentTool) error {
 	if r == nil {
 		return nil
 	}
+	r.budgetMu.Lock()
+	defer r.budgetMu.Unlock()
 	if r.toolCallCounts == nil {
 		r.toolCallCounts = make(map[tool.AgentTool]int)
 	}
@@ -132,6 +146,8 @@ func (r *RunContext) CanCallModel() bool {
 	if r == nil {
 		return true
 	}
+	r.budgetMu.RLock()
+	defer r.budgetMu.RUnlock()
 	limit := r.runLimits.MaxModelCalls
 	return limit <= 0 || r.ModelCallCount < limit
 }
@@ -140,6 +156,8 @@ func (r *RunContext) CanCallTool(name tool.AgentTool) bool {
 	if r == nil {
 		return true
 	}
+	r.budgetMu.RLock()
+	defer r.budgetMu.RUnlock()
 	if limit := r.runLimits.MaxToolCalls; limit > 0 && r.ToolCallCount >= limit {
 		return false
 	}
@@ -153,6 +171,8 @@ func (r *RunContext) CanCallAnyTool(names ...tool.AgentTool) bool {
 	if r == nil {
 		return true
 	}
+	r.budgetMu.RLock()
+	defer r.budgetMu.RUnlock()
 	if limit := r.runLimits.MaxToolCalls; limit > 0 && r.ToolCallCount >= limit {
 		return false
 	}
@@ -160,7 +180,7 @@ func (r *RunContext) CanCallAnyTool(names ...tool.AgentTool) bool {
 		return true
 	}
 	for _, name := range names {
-		if r.CanCallTool(name) {
+		if limit := r.runLimits.MaxToolCallsByName[name]; limit <= 0 || r.toolCallCounts[name] < limit {
 			return true
 		}
 	}
@@ -168,7 +188,12 @@ func (r *RunContext) CanCallAnyTool(names ...tool.AgentTool) bool {
 }
 
 func (r *RunContext) ToolCallCountFor(name tool.AgentTool) int {
-	if r == nil || r.toolCallCounts == nil {
+	if r == nil {
+		return 0
+	}
+	r.budgetMu.RLock()
+	defer r.budgetMu.RUnlock()
+	if r.toolCallCounts == nil {
 		return 0
 	}
 	return r.toolCallCounts[name]
@@ -178,6 +203,8 @@ func (r *RunContext) BudgetContextText() string {
 	if r == nil {
 		return ""
 	}
+	r.budgetMu.RLock()
+	defer r.budgetMu.RUnlock()
 	limits := r.runLimits
 	parts := []string{
 		"This run has a bounded execution budget. Prefer direct progress over broad exploration.",
@@ -185,10 +212,44 @@ func (r *RunContext) BudgetContextText() string {
 		formatBudgetLine("Tool calls", r.ToolCallCount, limits.MaxToolCalls),
 	}
 	if limit := limits.MaxToolCallsByName[tool.AgentToolWebFetch]; limit > 0 {
-		parts = append(parts, formatBudgetLine("web_fetch calls", r.ToolCallCountFor(tool.AgentToolWebFetch), limit))
+		parts = append(parts, formatBudgetLine("web_fetch calls", r.toolCallCounts[tool.AgentToolWebFetch], limit))
+	}
+	if limit := limits.MaxToolCallsByName[tool.AgentToolWebSearch]; limit > 0 {
+		parts = append(parts, formatBudgetLine("web_search calls", r.toolCallCounts[tool.AgentToolWebSearch], limit))
 	}
 	parts = append(parts, "If a tool returns a budget-exceeded message, stop calling tools and answer with the evidence already available. Clearly say what was not verified.")
 	return strings.Join(parts, "\n")
+}
+
+func (r *RunContext) recordModelUsage(usage *schema.TokenUsage) {
+	if r == nil || usage == nil {
+		return
+	}
+	r.budgetMu.Lock()
+	defer r.budgetMu.Unlock()
+	r.promptTokens += usage.PromptTokens
+	r.completionTokens += usage.CompletionTokens
+	r.totalTokens += usage.TotalTokens
+}
+
+func (r *RunContext) RunMetrics() RunMetrics {
+	if r == nil {
+		return RunMetrics{}
+	}
+	r.budgetMu.RLock()
+	defer r.budgetMu.RUnlock()
+	byName := make(map[string]int, len(r.toolCallCounts))
+	for name, count := range r.toolCallCounts {
+		byName[string(name)] = count
+	}
+	return RunMetrics{
+		ModelCalls:       r.ModelCallCount,
+		ToolCalls:        r.ToolCallCount,
+		ToolCallsByName:  byName,
+		PromptTokens:     r.promptTokens,
+		CompletionTokens: r.completionTokens,
+		TotalTokens:      r.totalTokens,
+	}
 }
 
 func formatBudgetLine(label string, used int, limit int) string {
@@ -274,6 +335,8 @@ func (r *RunContext) SetContextBlockWithPriority(key string, title string, conte
 	if r == nil {
 		return
 	}
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	key = strings.TrimSpace(key)
 	if key == "" {
 		key = fmt.Sprintf("context-%d", len(r.contextBlocks)+1)
@@ -316,15 +379,19 @@ func (r *RunContext) ContextBlocks() []RuntimeContextBlock {
 	if r == nil {
 		return nil
 	}
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
 	blocks := make([]RuntimeContextBlock, len(r.contextBlocks))
 	copy(blocks, r.contextBlocks)
 	return blocks
 }
 
 func (r *RunContext) DisableTool(name tool.AgentTool, reason string) {
-	if name == "" {
+	if r == nil || name == "" {
 		return
 	}
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	if r.disabledTools == nil {
 		r.disabledTools = make(map[tool.AgentTool]string)
 	}
@@ -332,16 +399,31 @@ func (r *RunContext) DisableTool(name tool.AgentTool, reason string) {
 }
 
 func (r *RunContext) EnableTool(name tool.AgentTool) {
+	if r == nil {
+		return
+	}
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	delete(r.disabledTools, name)
 }
 
 func (r *RunContext) ToolDisabled(name tool.AgentTool) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
 	reason, ok := r.disabledTools[name]
 	return reason, ok
 }
 
 func (r *RunContext) ToolResults() []ToolExecution {
-	if r == nil || len(r.toolResults) == 0 {
+	if r == nil {
+		return nil
+	}
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	if len(r.toolResults) == 0 {
 		return nil
 	}
 	results := make([]ToolExecution, len(r.toolResults))
@@ -353,6 +435,8 @@ func (r *RunContext) recordToolResult(result ToolResult) {
 	if r == nil {
 		return
 	}
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	r.toolResults = append(r.toolResults, ToolExecution{
 		Call:    result.Call,
 		Content: result.Content,
@@ -456,9 +540,11 @@ func maxInt(a int, b int) int {
 }
 
 type ToolResult struct {
-	Call    schema.ToolCall
-	Content string
-	Err     error
+	Call       schema.ToolCall
+	Content    string
+	Err        error
+	StartedAt  time.Time
+	FinishedAt time.Time
 }
 
 type ToolExecution struct {

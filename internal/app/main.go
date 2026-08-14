@@ -2,10 +2,12 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +19,7 @@ import (
 	"ternura/config"
 	"ternura/internal/cron"
 	"ternura/internal/feishu"
+	"ternura/internal/mcpruntime"
 	"ternura/tool"
 )
 
@@ -26,6 +29,7 @@ func Run() {
 	query := flag.String("q", "hello", "prompt text")
 	serve := flag.Bool("serve", false, "run daemon for Feishu and cron")
 	addr := flag.String("addr", ":8080", "daemon HTTP address for callbacks and health checks")
+	evalPath := flag.String("eval", "", "run a JSONL agent evaluation suite")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -34,19 +38,38 @@ func Run() {
 	modelConf := config.NewModelConfig()
 
 	if *serve {
-		server := newAgentServer(modelConf)
+		server := newAgentServerWithContext(ctx, modelConf)
+		defer server.close()
 		go newCronRunner(server).Run(ctx)
 		if server.feishu.WebSocketEnabled() {
 			go server.feishu.StartWebSocket(ctx)
 		}
 		log.Printf("serving Ternura daemon on http://localhost%s", *addr)
-		if err := http.ListenAndServe(*addr, server.routes()); err != nil {
-			log.Fatalf("server error: %v", err)
+		if err := http.ListenAndServe(*addr, server.routes()); err != nil && err != http.ErrServerClosed {
+			log.Printf("server error: %v", err)
 		}
 		return
 	}
 
-	cliAgent := newAgentFromSkillRegistry(modelConf, newCLISkillRegistry(tool.NewCronTool(nil, nil, nil)))
+	registry := newCLISkillRegistry(tool.NewCronTool(nil, nil, nil))
+	mcpRuntime := loadMCPRuntime(ctx)
+	defer mcpRuntime.Close()
+	if mcpSkill := newMCPSkill(mcpRuntime.Tools()); mcpSkill != nil {
+		registry.Register(mcpSkill)
+	}
+	if strings.TrimSpace(*evalPath) != "" {
+		summary, err := runEvalSuite(ctx, *evalPath, func() *agent.Agent {
+			return newAgentFromSkillRegistry(modelConf, registry)
+		})
+		if err != nil {
+			log.Printf("agent eval error: %v", err)
+			return
+		}
+		content, _ := json.MarshalIndent(summary, "", "  ")
+		fmt.Println(string(content))
+		return
+	}
+	cliAgent := newAgentFromSkillRegistry(modelConf, registry)
 	result, err := cliAgent.RunWithTrace(ctx, *query)
 	if err != nil {
 		log.Printf("agent run error: %v", err)
@@ -64,6 +87,7 @@ type agentServer struct {
 	mu                   sync.Mutex
 	agent                *agent.Agent
 	store                *sessionStore
+	checkpoints          *agent.FileCheckPointStore
 	memory               *memoryStore
 	activeMemoryKeywords activeMemoryKeywordExtractor
 	activeMemorySummary  activeMemorySummarizer
@@ -71,17 +95,31 @@ type agentServer struct {
 	cronTool             *tool.CronTool
 	cronWake             chan struct{}
 	feishu               *feishu.Service
+	mcpRuntime           *mcpruntime.Runtime
+	ctx                  context.Context
+	taskMu               sync.Mutex
+	taskCancels          map[string]context.CancelFunc
+	taskSessionLocks     map[string]*sync.Mutex
 }
 
 func newAgentServer(modelConf config.ModelConfig) *agentServer {
+	return newAgentServerWithContext(context.Background(), modelConf)
+}
+
+func newAgentServerWithContext(ctx context.Context, modelConf config.ModelConfig) *agentServer {
 	s := &agentServer{
-		modelConf: modelConf,
-		store:     newSessionStore(defaultSessionPath),
-		cronWake:  make(chan struct{}, 1),
+		modelConf:        modelConf,
+		store:            newSessionStore(defaultSessionPath),
+		cronWake:         make(chan struct{}, 1),
+		ctx:              ctx,
+		taskCancels:      make(map[string]context.CancelFunc),
+		taskSessionLocks: make(map[string]*sync.Mutex),
 	}
+	s.checkpoints = agent.NewFileCheckPointStore(filepath.Join(s.store.root, "checkpoints"))
 	s.memory = newMemoryStore(s.store.root)
 	s.activeMemoryKeywords = newEinoActiveMemoryKeywordExtractor(modelConf)
 	s.activeMemorySummary = newEinoActiveMemorySummarizer(modelConf)
+	s.mcpRuntime = loadMCPRuntime(ctx)
 	s.cron = cron.NewService(s.store.root)
 	s.cronTool = tool.NewCronTool(s.cronAdd, s.cronList, s.cronRemove)
 	feishuConfig := feishu.NewConfigFromEnv()
@@ -96,9 +134,40 @@ func newAgentServer(modelConf config.ModelConfig) *agentServer {
 	return s
 }
 
+func loadMCPRuntime(ctx context.Context) *mcpruntime.Runtime {
+	path := mcpruntime.ResolveConfigPath(mcpruntime.ConfigPathFromEnv())
+	runtime, err := mcpruntime.Load(ctx, path)
+	if err != nil {
+		log.Printf("load MCP integrations from %s: %v", path, err)
+	}
+	if runtime == nil {
+		return &mcpruntime.Runtime{}
+	}
+	if count := len(runtime.Tools()); count > 0 {
+		log.Printf("loaded %d MCP tools from %s", count, path)
+	}
+	return runtime
+}
+
+func (s *agentServer) close() {
+	if s == nil {
+		return
+	}
+	s.cancelAllTasks()
+	if s.mcpRuntime != nil {
+		if err := s.mcpRuntime.Close(); err != nil {
+			log.Printf("close MCP integrations: %v", err)
+		}
+	}
+}
+
 func (s *agentServer) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/api/feishu/events", s.feishu)
+	mux.HandleFunc("/api/tasks", s.handleTasks)
+	mux.HandleFunc("/api/tasks/", s.handleTask)
+	mux.HandleFunc("/api/agent-card", s.handleAgentCard)
+	mux.HandleFunc("/.well-known/agent-card.json", s.handleAgentCard)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	return mux
 }
@@ -114,9 +183,13 @@ func (s *agentServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 const (
-	runStatusRunning   = "running"
-	runStatusSucceeded = "succeeded"
-	runStatusFailed    = "failed"
+	runStatusRunning         = "running"
+	runStatusWaitingApproval = "waiting_approval"
+	runStatusApproved        = "approved"
+	runStatusRejected        = "rejected"
+	runStatusSucceeded       = "succeeded"
+	runStatusFailed          = "failed"
+	runStatusCancelled       = "cancelled"
 )
 
 var runSequence uint64
@@ -152,7 +225,11 @@ func logRunFinish(run runLifecycle, status string, finishedAt time.Time) {
 }
 
 func (s *agentServer) resetAgent() {
-	s.agent = newAgentFromSkillRegistry(s.modelConf, s.newSkillRegistry("", s.cronTool))
+	s.agent = newAgentFromSkillRegistry(
+		s.modelConf,
+		s.newSkillRegistry("", s.cronTool),
+		agent.WithCheckpointStore(s.checkpoints),
+	)
 }
 
 func (s *agentServer) resetAgentFromHistory() {

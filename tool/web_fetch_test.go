@@ -38,6 +38,45 @@ func TestWebFetchToolFetchesHTMLAsReadableText(t *testing.T) {
 	}
 }
 
+func TestWebFetchToolUsesReadabilityForArticleMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html>
+<html><head>
+<title>A practical agent article</title>
+<meta property="og:site_name" content="Ternura Notes">
+<meta name="author" content="Ternura Team">
+</head><body>
+<nav>Home Products Pricing Sign in</nav>
+<article><h1>A practical agent article</h1>
+<p>Reliable agents separate web discovery from source reading. Search results help locate useful pages, but the agent must inspect the original source before making factual claims.</p>
+<p>A readable-content extractor removes navigation, advertisements, and repeated page chrome. This gives the model a cleaner context while keeping the final source URL visible.</p>
+<p>The fallback path still matters because documentation pages and small websites do not always look like conventional news articles.</p>
+</article><footer>Copyright and unrelated links</footer>
+</body></html>`))
+	}))
+	defer server.Close()
+
+	output, err := NewWebFetchTool().InvokableRun(context.Background(), `{"url":"`+server.URL+`"}`)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, want := range []string{
+		"Extraction: readability",
+		"Title: A practical agent article",
+		"Byline: Ternura Team",
+		"Site: Ternura Notes",
+		"Reliable agents separate web discovery",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "Home Products Pricing Sign in") {
+		t.Fatalf("navigation leaked into readability output:\n%s", output)
+	}
+}
+
 func TestWebFetchToolRejectsUnsupportedScheme(t *testing.T) {
 	_, err := NewWebFetchTool().InvokableRun(context.Background(), `{"url":"file:///etc/passwd"}`)
 	if err == nil {

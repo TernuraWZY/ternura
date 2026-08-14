@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
-	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
+	"github.com/cloudwego/eino/adk"
 	einomodel "github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -20,27 +20,58 @@ import (
 )
 
 type Agent struct {
-	systemPrompt   string
-	model          string
-	chatModel      einomodel.ToolCallingChatModel
-	contextBuilder *ContextBuilder
-	messages       []*schema.Message
-	tools          map[tool.AgentTool]tool.Tool
-	hooks          *HookManager
-	runLimits      RunLimits
+	systemPrompt    string
+	model           string
+	chatModel       einomodel.ToolCallingChatModel
+	contextBuilder  *ContextBuilder
+	messages        []*schema.Message
+	tools           map[tool.AgentTool]tool.Tool
+	hooks           *HookManager
+	runLimits       RunLimits
+	checkpointStore adk.CheckPointStore
+	approvalPolicy  ToolApprovalPolicy
+	fallbackModels  []einomodel.ToolCallingChatModel
+	toolSearch      DynamicToolSearchConfig
 }
 
 type AgentRunResult struct {
-	Content    string               `json:"content"`
-	Trace      []AgentTraceItem     `json:"trace,omitempty"`
-	RawContent string               `json:"raw_content,omitempty"`
-	ModelInput []ModelInputSnapshot `json:"model_input,omitempty"`
+	Content         string               `json:"content"`
+	Trace           []AgentTraceItem     `json:"trace,omitempty"`
+	RawContent      string               `json:"raw_content,omitempty"`
+	ModelInput      []ModelInputSnapshot `json:"model_input,omitempty"`
+	CheckpointID    string               `json:"checkpoint_id,omitempty"`
+	PendingApproval *ToolApprovalRequest `json:"pending_approval,omitempty"`
+	Artifacts       []AgentArtifact      `json:"artifacts,omitempty"`
+	Metrics         RunMetrics           `json:"metrics,omitempty"`
+}
+
+type AgentArtifact struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	MIMEType string `json:"mime_type"`
+	Content  string `json:"content,omitempty"`
+	URI      string `json:"uri,omitempty"`
 }
 
 type AgentTraceItem struct {
-	Type    string `json:"type"`
-	Title   string `json:"title"`
-	Content string `json:"content"`
+	ID         string `json:"id,omitempty"`
+	Type       string `json:"type"`
+	Title      string `json:"title"`
+	Content    string `json:"content"`
+	Status     string `json:"status,omitempty"`
+	StartedAt  string `json:"started_at,omitempty"`
+	FinishedAt string `json:"finished_at,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+type RunMetrics struct {
+	ModelCalls       int            `json:"model_calls,omitempty"`
+	ToolCalls        int            `json:"tool_calls,omitempty"`
+	ToolCallsByName  map[string]int `json:"tool_calls_by_name,omitempty"`
+	PromptTokens     int            `json:"prompt_tokens,omitempty"`
+	CompletionTokens int            `json:"completion_tokens,omitempty"`
+	TotalTokens      int            `json:"total_tokens,omitempty"`
 }
 
 type ModelInputSnapshot struct {
@@ -72,20 +103,21 @@ type ConversationMessage struct {
 const modelInputSnapshotContentRunes = 4000
 
 type AgentStreamEvent struct {
-	Type       string           `json:"type"`
-	RunID      string           `json:"run_id,omitempty"`
-	Status     string           `json:"status,omitempty"`
-	StartedAt  string           `json:"started_at,omitempty"`
-	FinishedAt string           `json:"finished_at,omitempty"`
-	DurationMS int64            `json:"duration_ms,omitempty"`
-	ID         string           `json:"id,omitempty"`
-	TraceType  string           `json:"trace_type,omitempty"`
-	Title      string           `json:"title,omitempty"`
-	Delta      string           `json:"delta,omitempty"`
-	Content    string           `json:"content,omitempty"`
-	Trace      []AgentTraceItem `json:"trace,omitempty"`
-	RawContent string           `json:"raw_content,omitempty"`
-	Error      string           `json:"error,omitempty"`
+	Type       string               `json:"type"`
+	RunID      string               `json:"run_id,omitempty"`
+	Status     string               `json:"status,omitempty"`
+	StartedAt  string               `json:"started_at,omitempty"`
+	FinishedAt string               `json:"finished_at,omitempty"`
+	DurationMS int64                `json:"duration_ms,omitempty"`
+	ID         string               `json:"id,omitempty"`
+	TraceType  string               `json:"trace_type,omitempty"`
+	Title      string               `json:"title,omitempty"`
+	Delta      string               `json:"delta,omitempty"`
+	Content    string               `json:"content,omitempty"`
+	Trace      []AgentTraceItem     `json:"trace,omitempty"`
+	RawContent string               `json:"raw_content,omitempty"`
+	Error      string               `json:"error,omitempty"`
+	Approval   *ToolApprovalRequest `json:"approval,omitempty"`
 }
 
 type AgentOption func(*Agent)
@@ -112,18 +144,32 @@ func WithRunLimits(limits RunLimits) AgentOption {
 	}
 }
 
-func NewAgent(modelConf config.ModelConfig, systemPrompt string, tools []tool.Tool, opts ...AgentOption) *Agent {
-	chatModel, err := einoopenai.NewChatModel(context.Background(), &einoopenai.ChatModelConfig{
-		BaseURL: modelConf.BaseURL,
-		APIKey:  modelConf.ApiKey,
-		Model:   modelConf.Model,
-		ExtraFields: map[string]any{
-			"parallel_tool_calls": false,
-		},
-	})
-	if err != nil {
-		log.Printf("create Eino OpenAI chat model: %v", err)
+func WithCheckpointStore(store adk.CheckPointStore) AgentOption {
+	return func(a *Agent) {
+		a.checkpointStore = store
 	}
+}
+
+func WithToolApprovalPolicy(policy ToolApprovalPolicy) AgentOption {
+	return func(a *Agent) {
+		a.approvalPolicy = policy
+	}
+}
+
+func WithFallbackModels(models ...einomodel.ToolCallingChatModel) AgentOption {
+	return func(a *Agent) {
+		a.fallbackModels = append([]einomodel.ToolCallingChatModel(nil), models...)
+	}
+}
+
+func WithDynamicToolSearch(config DynamicToolSearchConfig) AgentOption {
+	return func(a *Agent) {
+		a.toolSearch = normalizeDynamicToolSearchConfig(config)
+	}
+}
+
+func NewAgent(modelConf config.ModelConfig, systemPrompt string, tools []tool.Tool, opts ...AgentOption) *Agent {
+	chatModel := newConfiguredChatModel(modelConf)
 
 	a := Agent{
 		systemPrompt:   systemPrompt,
@@ -134,6 +180,11 @@ func NewAgent(modelConf config.ModelConfig, systemPrompt string, tools []tool.To
 		messages:       make([]*schema.Message, 0),
 		hooks:          NewHookManager(),
 		runLimits:      RunLimitsFromEnv(),
+		approvalPolicy: ToolApprovalPolicyFromEnv(),
+		toolSearch:     DynamicToolSearchConfigFromEnv(),
+	}
+	if fallback := newFallbackChatModelFromEnv(modelConf); fallback != nil {
+		a.fallbackModels = append(a.fallbackModels, fallback)
 	}
 	for _, t := range tools {
 		a.tools[t.ToolName()] = t
@@ -178,17 +229,52 @@ func (a *Agent) Run(ctx context.Context, query string) (string, error) {
 
 // RunWithTrace 提供单次用户请求 query 的 tool loop，返回最终内容和本轮的 think/tool trace。
 func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRunResult, runErr error) {
+	return a.runMessageWithTrace(ctx, schema.UserMessage(query), "", nil)
+}
+
+func (a *Agent) RunWithTraceCheckpoint(ctx context.Context, query string, checkpointID string) (result AgentRunResult, runErr error) {
+	return a.runMessageWithTrace(ctx, schema.UserMessage(query), checkpointID, nil)
+}
+
+// RunMessageWithTrace accepts Eino's native user message, including image,
+// audio, video, and file input parts. Channel adapters can use this method
+// without introducing a project-specific multimodal message format.
+func (a *Agent) RunMessageWithTrace(ctx context.Context, message *schema.Message, checkpointID string) (result AgentRunResult, runErr error) {
+	if message == nil || message.Role != schema.User {
+		return result, errors.New("an Eino user message is required")
+	}
+	return a.runMessageWithTrace(ctx, message, checkpointID, nil)
+}
+
+func (a *Agent) ResumeWithTrace(ctx context.Context, query string, checkpointID string, interruptID string, decision ToolApprovalDecision) (result AgentRunResult, runErr error) {
+	return a.runMessageWithTrace(ctx, schema.UserMessage(query), checkpointID, &adkResumeRequest{
+		InterruptID: interruptID,
+		Decision:    decision,
+	})
+}
+
+func (a *Agent) runMessageWithTrace(ctx context.Context, userMessage *schema.Message, checkpointID string, resume *adkResumeRequest) (result AgentRunResult, runErr error) {
+	query := userMessageText(userMessage)
 	runCtx := NewRunContext(query, RunModeSync)
 	runCtx.SetRunLimits(a.runLimits)
+	if checkpointID = strings.TrimSpace(checkpointID); checkpointID != "" {
+		runCtx.Metadata[runMetadataCheckpointID] = checkpointID
+	}
+	if resume != nil {
+		runCtx.Metadata[runMetadataResume] = resume
+	}
 	if err := a.hooks.BeforeRun(ctx, runCtx); err != nil {
 		return result, err
 	}
 	defer func() {
+		result.Metrics = runCtx.RunMetrics()
 		if err := a.hooks.AfterRun(ctx, runCtx, result, runErr); err != nil && runErr == nil {
 			runErr = err
 		}
 	}()
-	a.messages = append(a.messages, schema.UserMessage(query))
+	if resume == nil {
+		a.messages = append(a.messages, cloneMessages([]*schema.Message{userMessage})[0])
+	}
 	if err := a.hooks.AfterUserMessage(ctx, runCtx); err != nil {
 		return result, err
 	}
@@ -234,6 +320,33 @@ func (a *Agent) RunWithTrace(ctx context.Context, query string) (result AgentRun
 	return result, nil
 }
 
+func userMessageText(message *schema.Message) string {
+	if message == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(message.UserInputMultiContent)+1)
+	if content := strings.TrimSpace(message.Content); content != "" {
+		parts = append(parts, content)
+	}
+	for _, part := range message.UserInputMultiContent {
+		switch part.Type {
+		case schema.ChatMessagePartTypeText:
+			if text := strings.TrimSpace(part.Text); text != "" {
+				parts = append(parts, text)
+			}
+		case schema.ChatMessagePartTypeImageURL:
+			parts = append(parts, "[image]")
+		case schema.ChatMessagePartTypeAudioURL:
+			parts = append(parts, "[audio]")
+		case schema.ChatMessagePartTypeVideoURL:
+			parts = append(parts, "[video]")
+		case schema.ChatMessagePartTypeFileURL:
+			parts = append(parts, "[file]")
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
 func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentStreamEvent) error) (result AgentRunResult, runErr error) {
 	runCtx := NewRunContext(query, RunModeStreaming)
 	runCtx.SetRunLimits(a.runLimits)
@@ -241,6 +354,7 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 		return result, err
 	}
 	defer func() {
+		result.Metrics = runCtx.RunMetrics()
 		if err := a.hooks.AfterRun(ctx, runCtx, result, runErr); err != nil && runErr == nil {
 			runErr = err
 		}
@@ -310,6 +424,8 @@ func budgetExceededFinalMessage(err error) string {
 	var budgetErr RunBudgetError
 	if errors.As(err, &budgetErr) {
 		switch {
+		case budgetErr.Kind == "tool" && budgetErr.Tool == tool.AgentToolWebSearch:
+			return fmt.Sprintf("这轮没有搜到更多有效网页来源，`web_search` 已达到本轮上限（%d 次）。\n\n我已经停止继续搜索，避免一直等待。可以缩小关键词或换一个更具体的问题继续查。", budgetErr.Limit)
 		case budgetErr.Kind == "tool" && budgetErr.Tool == tool.AgentToolWebFetch:
 			return fmt.Sprintf("这轮没有 fetch 到更多有效网页信息，`web_fetch` 已达到本轮上限（%d 次）。\n\n我已经停止继续抓取，避免一直等待。可以换一个更具体的网址或问题继续查。", budgetErr.Limit)
 		case budgetErr.Kind == "tool":
@@ -325,6 +441,8 @@ func budgetExceededToolContent(err error) string {
 	var budgetErr RunBudgetError
 	if errors.As(err, &budgetErr) {
 		switch {
+		case budgetErr.Kind == "tool" && budgetErr.Tool == tool.AgentToolWebSearch:
+			return fmt.Sprintf("没有搜到更多有效网页来源：web_search 已达到本轮上限（%d 次）。请停止继续搜索，基于已经拿到的来源继续读取或回答；如果没有有效来源，请明确告诉用户。", budgetErr.Limit)
 		case budgetErr.Kind == "tool" && budgetErr.Tool == tool.AgentToolWebFetch:
 			return fmt.Sprintf("没有 fetch 到更多有效网页信息：web_fetch 已达到本轮上限（%d 次）。请停止继续抓取网页，基于已经拿到的可用证据回答；如果已有网页结果不可用，请明确告诉用户没有 fetch 到有效信息。", budgetErr.Limit)
 		case budgetErr.Kind == "tool":
@@ -433,11 +551,32 @@ func effectiveToolPolicy(runCtx *RunContext, available map[tool.AgentTool]einoto
 }
 
 func toolTraceFromResult(result ToolResult) AgentTraceItem {
-	return AgentTraceItem{
-		Type:    "tool",
-		Title:   fmt.Sprintf("Tool use: %s", result.Call.Function.Name),
-		Content: formatToolTrace(result.Call.Function.Arguments, result.Content, result.Err),
+	status := "succeeded"
+	if result.Err != nil {
+		status = "failed"
 	}
+	duration := result.FinishedAt.Sub(result.StartedAt).Milliseconds()
+	if result.StartedAt.IsZero() || result.FinishedAt.IsZero() || duration < 0 {
+		duration = 0
+	}
+	return AgentTraceItem{
+		ID:         result.Call.ID,
+		Type:       "tool",
+		Title:      fmt.Sprintf("Tool use: %s", result.Call.Function.Name),
+		Content:    formatToolTrace(result.Call.Function.Arguments, result.Content, result.Err),
+		Status:     status,
+		StartedAt:  formatTraceTime(result.StartedAt),
+		FinishedAt: formatTraceTime(result.FinishedAt),
+		DurationMS: duration,
+		ToolCallID: result.Call.ID,
+	}
+}
+
+func formatTraceTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format(time.RFC3339Nano)
 }
 
 func emitTraceItem(emit func(AgentStreamEvent) error, id string, item AgentTraceItem) error {
@@ -446,6 +585,7 @@ func emitTraceItem(emit func(AgentStreamEvent) error, id string, item AgentTrace
 		ID:        id,
 		TraceType: item.Type,
 		Title:     item.Title,
+		StartedAt: item.StartedAt,
 	}); err != nil {
 		return err
 	}
@@ -459,9 +599,12 @@ func emitTraceItem(emit func(AgentStreamEvent) error, id string, item AgentTrace
 		}
 	}
 	return emit(AgentStreamEvent{
-		Type:    "trace_done",
-		ID:      id,
-		Content: item.Content,
+		Type:       "trace_done",
+		ID:         id,
+		Content:    item.Content,
+		Status:     item.Status,
+		FinishedAt: item.FinishedAt,
+		DurationMS: item.DurationMS,
 	})
 }
 

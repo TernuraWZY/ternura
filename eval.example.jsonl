@@ -1,0 +1,3 @@
+# One JSON object per line. Each case starts with a fresh Agent conversation.
+{"name":"concise greeting","input":"只回复：你好","expect_contains":["你好"],"max_model_calls":2,"max_tool_calls":0,"timeout_seconds":60}
+{"name":"workspace evidence","input":"读取 README.md，并告诉我第一行是什么","require_tools":["read"],"max_model_calls":4,"max_tool_calls":2,"timeout_seconds":120}
