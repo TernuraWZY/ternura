@@ -25,6 +25,7 @@ const (
 	defaultMaxEventSize       = 1 << 20
 	defaultProcessingReaction = "OneSecond"
 	defaultProcessingDelay    = time.Second
+	defaultProgressCard       = true
 	defaultAgentTurnTimeout   = 4 * time.Minute
 	defaultReplyTimeout       = 15 * time.Second
 )
@@ -43,6 +44,7 @@ type Config struct {
 	ProcessingReaction     bool
 	ProcessingReactionType string
 	ProcessingDelay        time.Duration
+	ProgressCard           bool
 	AgentTurnTimeout       time.Duration
 	ReplyTimeout           time.Duration
 	AllowOpenIDs           []string
@@ -86,9 +88,10 @@ func (r Reply) Empty() bool {
 type HandlerFunc func(context.Context, InboundMessage) (Reply, error)
 
 type Service struct {
-	cfg    Config
-	handle HandlerFunc
-	client *http.Client
+	cfg              Config
+	handle           HandlerFunc
+	handleCardAction CardActionHandlerFunc
+	client           *http.Client
 
 	mu        sync.Mutex
 	token     tenantToken
@@ -116,6 +119,7 @@ func NewConfigFromEnv() Config {
 		ProcessingReaction:     envBool("FEISHU_PROCESSING_REACTION", true),
 		ProcessingReactionType: envDefault("FEISHU_PROCESSING_REACTION_TYPE", defaultProcessingReaction),
 		ProcessingDelay:        envDuration("FEISHU_PROCESSING_DELAY", defaultProcessingDelay),
+		ProgressCard:           envBool("FEISHU_PROGRESS_CARD", defaultProgressCard),
 		AgentTurnTimeout:       envDuration("TERNURA_AGENT_TURN_TIMEOUT", defaultAgentTurnTimeout),
 		ReplyTimeout:           envDuration("FEISHU_REPLY_TIMEOUT", defaultReplyTimeout),
 		AllowOpenIDs:           splitCSV(os.Getenv("FEISHU_ALLOW_OPEN_IDS")),
@@ -174,6 +178,20 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "read request", http.StatusBadRequest)
 		return
 	}
+	if action, matched, err := s.decodeCardAction(body); matched {
+		if err != nil {
+			log.Printf("feishu card action rejected: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		response, err := s.dispatchCardAction(r.Context(), *action)
+		if err != nil {
+			log.Printf("feishu card action failed: %v", err)
+			response = CardActionResponse{ToastType: "error", ToastContent: "操作失败，请稍后重试"}
+		}
+		writeJSON(w, http.StatusOK, cardActionCallbackPayload(response))
+		return
+	}
 
 	challenge, inbound, err := s.decodeIncoming(body)
 	if err != nil {
@@ -206,27 +224,48 @@ func (s *Service) process(ctx context.Context, inbound InboundMessage) {
 	turnCtx, cancel := context.WithTimeout(ctx, s.cfg.AgentTurnTimeout)
 	defer cancel()
 
-	replyMessage, err := s.handleWithProcessingReaction(turnCtx, inbound)
-	if err != nil {
-		log.Printf("feishu agent turn failed for %s: %v", inbound.MessageID, err)
-		replyMessage = Reply{Content: s.failureReplyContent(err)}
+	progressCh := make(chan ProgressUpdate, 16)
+	turnCtx = withProgressReporter(turnCtx, func(update ProgressUpdate) {
+		select {
+		case progressCh <- update:
+		default:
+		}
+	})
+	resultCh := make(chan handlerResult, 1)
+	go func() {
+		reply, err := s.handle(turnCtx, inbound)
+		resultCh <- handlerResult{reply: reply, err: err}
+	}()
+
+	latest := ProgressUpdate{Stage: ProgressStageStarted, Detail: "正在理解你的请求"}
+	var reactionID string
+	var progressMessageID string
+	feedbackTimer := s.processingFeedbackTimer()
+	if feedbackTimer != nil {
+		defer feedbackTimer.Stop()
 	}
-	if replyMessage.Empty() {
-		return
+	var feedback <-chan time.Time
+	if feedbackTimer != nil {
+		feedback = feedbackTimer.C
 	}
 
-	sendCtx, sendCancel := context.WithTimeout(context.Background(), s.cfg.ReplyTimeout)
-	defer sendCancel()
-	if err := s.Send(sendCtx, OutboundMessage{
-		ReceiveIDType: inbound.ReceiveIDType,
-		ReceiveID:     inbound.ReceiveID,
-		MessageID:     inbound.MessageID,
-		ThreadID:      inbound.ThreadID,
-		Content:       replyMessage.Content,
-		Card:          replyMessage.Card,
-		Reply:         s.shouldReplyToInbound(inbound),
-	}); err != nil {
-		log.Printf("feishu send reply failed for %s: %v", inbound.MessageID, err)
+	for {
+		select {
+		case update := <-progressCh:
+			latest = mergeProgressUpdate(latest, update)
+			if progressMessageID != "" {
+				s.patchProgressCard(progressMessageID, latest)
+			}
+		case <-feedback:
+			feedback = nil
+			reactionID, progressMessageID = s.startProcessingFeedback(inbound, latest)
+		case result := <-resultCh:
+			s.finishProcessingFeedback(inbound, reactionID, progressMessageID, result)
+			return
+		case <-turnCtx.Done():
+			s.finishProcessingFeedback(inbound, reactionID, progressMessageID, handlerResult{err: turnCtx.Err()})
+			return
+		}
 	}
 }
 
@@ -242,83 +281,36 @@ type handlerResult struct {
 	err   error
 }
 
-func (s *Service) handleWithProcessingReaction(ctx context.Context, inbound InboundMessage) (Reply, error) {
-	if !s.processingReactionEnabled() {
-		return s.handle(ctx, inbound)
-	}
-
-	resultCh := make(chan handlerResult, 1)
-	go func() {
-		reply, err := s.handle(ctx, inbound)
-		resultCh <- handlerResult{reply: reply, err: err}
-	}()
-
-	delay := s.cfg.ProcessingDelay
-	if delay <= 0 {
-		s.addProcessingReaction(ctx, inbound)
-		return waitForHandlerResult(ctx, resultCh)
-	}
-
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-
-	select {
-	case result := <-resultCh:
-		return result.reply, result.err
-	case <-timer.C:
-		s.addProcessingReaction(ctx, inbound)
-		return waitForHandlerResult(ctx, resultCh)
-	case <-ctx.Done():
-		return Reply{}, ctx.Err()
-	}
-}
-
-func waitForHandlerResult(ctx context.Context, resultCh <-chan handlerResult) (Reply, error) {
-	select {
-	case result := <-resultCh:
-		return result.reply, result.err
-	case <-ctx.Done():
-		return Reply{}, ctx.Err()
-	}
-}
-
-func (s *Service) processingReactionEnabled() bool {
-	return s.cfg.ProcessingReaction &&
-		s.cfg.ProcessingDelay >= 0 &&
-		strings.TrimSpace(s.cfg.ProcessingReactionType) != ""
-}
-
-func (s *Service) addProcessingReaction(ctx context.Context, inbound InboundMessage) {
-	reactionType := strings.TrimSpace(s.cfg.ProcessingReactionType)
-	if reactionType == "" || strings.TrimSpace(inbound.MessageID) == "" {
-		return
-	}
-	if err := s.AddReaction(ctx, inbound.MessageID, reactionType); err != nil {
-		log.Printf("feishu add processing reaction failed for %s: %v", inbound.MessageID, err)
-	}
-}
-
 func (s *Service) shouldReplyToInbound(inbound InboundMessage) bool {
 	return s.cfg.ReplyToMessage || strings.TrimSpace(inbound.ThreadID) != ""
 }
 
 func (s *Service) Send(ctx context.Context, out OutboundMessage) error {
+	_, err := s.send(ctx, out)
+	return err
+}
+
+func (s *Service) send(ctx context.Context, out OutboundMessage) (string, error) {
 	if !s.Enabled() {
-		return errors.New("feishu is disabled")
+		return "", errors.New("feishu is disabled")
 	}
 	if out.Card == nil && strings.TrimSpace(out.Content) == "" {
-		return nil
+		return "", nil
 	}
 	msgType, content, err := formatOutboundContent(out.Content, out.Card)
 	if err != nil {
-		return err
+		return "", err
 	}
 	payload := map[string]string{
 		"msg_type": msgType,
 		"content":  content,
 	}
+	var response struct {
+		MessageID string `json:"message_id"`
+	}
 	if out.Reply && strings.TrimSpace(out.MessageID) != "" {
-		return s.postOpenAPI(ctx, "/open-apis/im/v1/messages/"+url.PathEscape(out.MessageID)+"/reply", "", payload, nil)
+		err := s.postOpenAPI(ctx, "/open-apis/im/v1/messages/"+url.PathEscape(out.MessageID)+"/reply", "", payload, &response)
+		return response.MessageID, err
 	}
 
 	receiveIDType := strings.TrimSpace(out.ReceiveIDType)
@@ -326,28 +318,62 @@ func (s *Service) Send(ctx context.Context, out OutboundMessage) error {
 		receiveIDType = inferReceiveIDType(out.ReceiveID)
 	}
 	if receiveIDType == "" || strings.TrimSpace(out.ReceiveID) == "" {
-		return errors.New("feishu receive id is required")
+		return "", errors.New("feishu receive id is required")
 	}
 	createPayload := map[string]string{
 		"receive_id": out.ReceiveID,
 		"msg_type":   msgType,
 		"content":    content,
 	}
-	return s.postOpenAPI(ctx, "/open-apis/im/v1/messages", "receive_id_type="+url.QueryEscape(receiveIDType), createPayload, nil)
+	err = s.postOpenAPI(ctx, "/open-apis/im/v1/messages", "receive_id_type="+url.QueryEscape(receiveIDType), createPayload, &response)
+	return response.MessageID, err
 }
 
 func (s *Service) AddReaction(ctx context.Context, messageID string, reactionType string) error {
+	_, err := s.addReaction(ctx, messageID, reactionType)
+	return err
+}
+
+func (s *Service) addReaction(ctx context.Context, messageID string, reactionType string) (string, error) {
 	messageID = strings.TrimSpace(messageID)
 	reactionType = strings.TrimSpace(reactionType)
 	if messageID == "" || reactionType == "" {
-		return nil
+		return "", nil
 	}
 	payload := map[string]any{
 		"reaction_type": map[string]string{
 			"emoji_type": reactionType,
 		},
 	}
-	return s.postOpenAPI(ctx, "/open-apis/im/v1/messages/"+url.PathEscape(messageID)+"/reactions", "", payload, nil)
+	var response struct {
+		ReactionID string `json:"reaction_id"`
+	}
+	err := s.postOpenAPI(ctx, "/open-apis/im/v1/messages/"+url.PathEscape(messageID)+"/reactions", "", payload, &response)
+	return response.ReactionID, err
+}
+
+func (s *Service) DeleteReaction(ctx context.Context, messageID string, reactionID string) error {
+	messageID = strings.TrimSpace(messageID)
+	reactionID = strings.TrimSpace(reactionID)
+	if messageID == "" || reactionID == "" {
+		return nil
+	}
+	path := "/open-apis/im/v1/messages/" + url.PathEscape(messageID) + "/reactions/" + url.PathEscape(reactionID)
+	return s.requestOpenAPI(ctx, http.MethodDelete, path, "", nil, nil)
+
+}
+
+func (s *Service) PatchCard(ctx context.Context, messageID string, card any) error {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" || card == nil {
+		return nil
+	}
+	content, err := json.Marshal(card)
+	if err != nil {
+		return err
+	}
+	payload := map[string]string{"content": string(content)}
+	return s.requestOpenAPI(ctx, http.MethodPatch, "/open-apis/im/v1/messages/"+url.PathEscape(messageID), "", payload, nil)
 }
 
 func (s *Service) decodeIncoming(body []byte) (string, *InboundMessage, error) {
@@ -528,6 +554,10 @@ func (s *Service) tenantAccessToken(ctx context.Context) (string, error) {
 }
 
 func (s *Service) postOpenAPI(ctx context.Context, path string, query string, payload any, target any) error {
+	return s.requestOpenAPI(ctx, http.MethodPost, path, query, payload, target)
+}
+
+func (s *Service) requestOpenAPI(ctx context.Context, method string, path string, query string, payload any, target any) error {
 	token, err := s.tenantAccessToken(ctx)
 	if err != nil {
 		return err
@@ -541,7 +571,7 @@ func (s *Service) postOpenAPI(ctx context.Context, path string, query string, pa
 		Msg  string          `json:"msg"`
 		Data json.RawMessage `json:"data,omitempty"`
 	}
-	if err := s.postJSON(ctx, endpoint, payload, token, &resp); err != nil {
+	if err := s.doJSON(ctx, method, endpoint, payload, token, &resp); err != nil {
 		return err
 	}
 	if resp.Code != 0 {
@@ -554,11 +584,19 @@ func (s *Service) postOpenAPI(ctx context.Context, path string, query string, pa
 }
 
 func (s *Service) postJSON(ctx context.Context, endpoint string, payload any, bearer string, target any) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
+	return s.doJSON(ctx, http.MethodPost, endpoint, payload, bearer, target)
+}
+
+func (s *Service) doJSON(ctx context.Context, method string, endpoint string, payload any, bearer string, target any) error {
+	var body []byte
+	var err error
+	if payload != nil {
+		body, err = json.Marshal(payload)
+		if err != nil {
+			return err
+		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

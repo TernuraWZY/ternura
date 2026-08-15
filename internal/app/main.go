@@ -124,6 +124,7 @@ func newAgentServerWithContext(ctx context.Context, modelConf config.ModelConfig
 	s.cronTool = tool.NewCronTool(s.cronAdd, s.cronList, s.cronRemove)
 	feishuConfig := feishu.NewConfigFromEnv()
 	s.feishu = feishu.NewService(feishuConfig, s.handleFeishuMessage)
+	s.feishu.SetCardActionHandler(s.handleFeishuCardAction)
 	if err := s.store.Load(); err != nil {
 		log.Printf("load persisted session: %v", err)
 	}

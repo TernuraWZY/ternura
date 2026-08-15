@@ -128,6 +128,15 @@ func WithHooks(hooks ...Hook) AgentOption {
 	}
 }
 
+func WithAdditionalHooks(hooks ...Hook) AgentOption {
+	return func(a *Agent) {
+		if a.hooks == nil {
+			a.hooks = NewHookManager()
+		}
+		a.hooks.Append(hooks...)
+	}
+}
+
 func WithHookManager(manager *HookManager) AgentOption {
 	return func(a *Agent) {
 		if manager == nil {

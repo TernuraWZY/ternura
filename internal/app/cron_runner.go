@@ -103,8 +103,9 @@ func unwrapCronRuntimePrompt(query string) string {
 }
 
 func (s *agentServer) runCronJob(ctx context.Context, job cron.Job) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	lock := s.taskSessionLock(job.Payload.SessionID)
+	lock.Lock()
+	defer lock.Unlock()
 
 	display := strings.TrimSpace(job.Payload.Message)
 	cronTool := tool.NewCronTool(s.cronAddForSession(job.Payload.SessionID), s.cronList, s.cronRemove)
@@ -132,7 +133,9 @@ func (s *agentServer) runCronJob(ctx context.Context, job cron.Job) {
 	}
 
 	if job.Payload.SessionID == s.store.CurrentSessionID() {
+		s.mu.Lock()
 		s.resetAgentFromSnapshot(s.store.Snapshot())
+		s.mu.Unlock()
 	}
 }
 

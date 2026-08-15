@@ -14,21 +14,29 @@ const maxFeishuTraceRunes = 4000
 var feishuEmailPattern = regexp.MustCompile(`(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b`)
 
 func formatFeishuAgentReply(result agent.AgentRunResult) feishu.Reply {
+	return formatFeishuAgentReplyForSession(result, "")
+}
+
+func formatFeishuAgentReplyForSession(result agent.AgentRunResult, sessionID string) feishu.Reply {
 	memoryItems := traceItemsByType(result.Trace, "memory")
 	thinkItems := traceItemsByType(result.Trace, "think")
 	toolItems := traceItemsByType(result.Trace, "tool")
-	content := sanitizeFeishuReplyText(strings.TrimSpace(result.Content))
+	fallbackContent := sanitizeFeishuReplyText(strings.TrimSpace(result.Content))
+	cardContent := fallbackContent
+	if result.PendingApproval != nil {
+		cardContent = formatFeishuApprovalSummary(*result.PendingApproval)
+	}
 	memoryItems = sanitizeTraceItemsForFeishu(memoryItems)
 	thinkItems = sanitizeTraceItemsForFeishu(thinkItems)
 	toolItems = sanitizeTraceItemsForFeishu(toolItems)
-	if len(memoryItems) == 0 && len(thinkItems) == 0 && len(toolItems) == 0 {
-		return feishu.Reply{Content: content}
+	if result.PendingApproval == nil && len(memoryItems) == 0 && len(thinkItems) == 0 && len(toolItems) == 0 {
+		return feishu.Reply{Content: fallbackContent}
 	}
 
-	fallback := formatFeishuAgentReplyText(content, memoryItems, thinkItems, toolItems)
+	fallback := formatFeishuAgentReplyText(fallbackContent, memoryItems, thinkItems, toolItems)
 	return feishu.Reply{
 		Content: fallback,
-		Card:    buildFeishuAgentReplyCard(content, memoryItems, thinkItems, toolItems),
+		Card:    buildFeishuAgentReplyCard(cardContent, memoryItems, thinkItems, toolItems, result.PendingApproval, sessionID),
 	}
 }
 
@@ -86,8 +94,8 @@ func formatFeishuTraceGroup(title string, items []agent.AgentTraceItem) string {
 	return strings.Join(lines, "\n")
 }
 
-func buildFeishuAgentReplyCard(content string, memoryItems []agent.AgentTraceItem, thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem) map[string]any {
-	elements := make([]any, 0, 4)
+func buildFeishuAgentReplyCard(content string, memoryItems []agent.AgentTraceItem, thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem, approval *agent.ToolApprovalRequest, sessionID string) map[string]any {
+	elements := make([]any, 0, 5)
 	if content != "" {
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
@@ -106,14 +114,81 @@ func buildFeishuAgentReplyCard(content string, memoryItems []agent.AgentTraceIte
 	if len(toolItems) > 0 {
 		elements = append(elements, feishuCollapsiblePanel("工具调用", len(toolItems), formatFeishuTraceGroup("工具调用", toolItems)))
 	}
+	if approval != nil {
+		elements = append(elements, feishuApprovalActions(*approval, sessionID))
+	}
 
-	return map[string]any{
+	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
 			"wide_screen_mode": true,
 		},
 		"body": map[string]any{
 			"elements": elements,
+		},
+	}
+	if approval != nil {
+		card["header"] = map[string]any{
+			"title":    map[string]string{"tag": "plain_text", "content": "等待确认"},
+			"template": "orange",
+		}
+	}
+	return card
+}
+
+func formatFeishuApprovalSummary(approval agent.ToolApprovalRequest) string {
+	reason := strings.TrimSpace(approval.Reason)
+	if reason == "" {
+		reason = "这个工具调用会产生外部副作用。"
+	}
+	arguments := strings.TrimSpace(approval.Arguments)
+	if arguments == "" {
+		arguments = "{}"
+	}
+	return strings.Join([]string{
+		"**需要确认后才能继续执行**",
+		"",
+		"- 工具：`" + string(approval.Tool) + "`",
+		"- 原因：" + sanitizeFeishuReplyText(reason),
+		"- 参数：`" + limitFeishuTraceContent(arguments) + "`",
+	}, "\n")
+}
+
+func feishuApprovalActions(approval agent.ToolApprovalRequest, sessionID string) map[string]any {
+	baseValue := map[string]any{
+		"session_id":    sessionID,
+		"checkpoint_id": approval.CheckpointID,
+	}
+	button := func(text string, buttonType string, action string) map[string]any {
+		value := make(map[string]any, len(baseValue)+1)
+		for key, item := range baseValue {
+			value[key] = item
+		}
+		value["action"] = action
+		return map[string]any{
+			"tag":   "button",
+			"text":  map[string]string{"tag": "plain_text", "content": text},
+			"type":  buttonType,
+			"width": "fill",
+			"behaviors": []any{map[string]any{
+				"type":  "callback",
+				"value": value,
+			}},
+		}
+	}
+	return map[string]any{
+		"tag":                "column_set",
+		"flex_mode":          "none",
+		"horizontal_spacing": "8px",
+		"columns": []any{
+			map[string]any{
+				"tag": "column", "width": "weighted", "weight": 1,
+				"elements": []any{button("批准", "primary", "approve_tool")},
+			},
+			map[string]any{
+				"tag": "column", "width": "weighted", "weight": 1,
+				"elements": []any{button("拒绝", "danger", "reject_tool")},
+			},
 		},
 	}
 }

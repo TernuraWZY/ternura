@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"ternura/agent"
+	"ternura/tool"
 )
 
 func TestFormatFeishuAgentReplyKeepsPlainContentWhenTraceEmpty(t *testing.T) {
@@ -150,5 +151,34 @@ func TestFormatFeishuAgentReplyRedactsEmailsInTrace(t *testing.T) {
 	card := fmt.Sprint(reply.Card)
 	if strings.Contains(card, "jubao@contact.sohu.com") {
 		t.Fatalf("card should redact email:\n%s", card)
+	}
+}
+
+func TestFormatFeishuAgentReplyUsesApprovalButtons(t *testing.T) {
+	reply := formatFeishuAgentReplyForSession(agent.AgentRunResult{
+		Content: "reply approve run-1 or reject run-1",
+		PendingApproval: &agent.ToolApprovalRequest{
+			CheckpointID: "run-1",
+			Tool:         tool.AgentToolBash,
+			Arguments:    `{"command":"go test ./..."}`,
+			Reason:       "将执行本地命令",
+		},
+	}, "feishu-session")
+
+	card, ok := reply.Card.(map[string]any)
+	if !ok {
+		t.Fatalf("approval reply should use a card: %+v", reply)
+	}
+	formatted := fmt.Sprint(card)
+	for _, want := range []string{"等待确认", "批准", "拒绝", "approve_tool", "reject_tool", "feishu-session", "run-1"} {
+		if !strings.Contains(formatted, want) {
+			t.Fatalf("approval card missing %q: %s", want, formatted)
+		}
+	}
+	if strings.Contains(formatted, "reply approve") {
+		t.Fatalf("card should present native controls instead of text commands: %s", formatted)
+	}
+	if !strings.Contains(reply.Content, "reply approve") {
+		t.Fatalf("fallback content should keep text approval commands: %s", reply.Content)
 	}
 }

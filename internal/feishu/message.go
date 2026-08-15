@@ -3,6 +3,7 @@ package feishu
 import (
 	"encoding/json"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -251,4 +252,88 @@ func shouldUseText(content string) bool {
 		return false
 	}
 	return true
+}
+
+func processingCard(progress ProgressUpdate) map[string]any {
+	status := "正在处理"
+	switch progress.Stage {
+	case ProgressStageThinking:
+		status = "正在思考"
+	case ProgressStageTool:
+		status = "正在使用工具"
+	case ProgressStageFinishing:
+		status = "正在整理结果"
+	}
+	detail := strings.TrimSpace(progress.Detail)
+	if detail == "" {
+		detail = "正在理解你的请求"
+	}
+	elements := []any{
+		map[string]any{
+			"tag":     "markdown",
+			"content": "**" + status + "**\n\n" + detail,
+		},
+	}
+	if progress.ToolCalls > 0 {
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": "<font color='grey'>已调用工具 " + strconv.Itoa(progress.ToolCalls) + " 次</font>",
+		})
+	}
+	if strings.TrimSpace(progress.RunID) != "" {
+		elements = append(elements, cardActionRow(
+			"取消任务",
+			"danger",
+			map[string]any{"action": "cancel_run", "run_id": progress.RunID},
+		))
+	}
+	return map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"wide_screen_mode": true},
+		"header": map[string]any{
+			"title":    map[string]string{"tag": "plain_text", "content": "Ternura"},
+			"template": "blue",
+		},
+		"body": map[string]any{"elements": elements},
+	}
+}
+
+func basicReplyCard(content string) map[string]any {
+	return map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"wide_screen_mode": true},
+		"header": map[string]any{
+			"title":    map[string]string{"tag": "plain_text", "content": "已完成"},
+			"template": "green",
+		},
+		"body": map[string]any{
+			"elements": []any{map[string]any{
+				"tag":     "markdown",
+				"content": strings.TrimSpace(content),
+			}},
+		},
+	}
+}
+
+func cardActionRow(text string, buttonType string, value map[string]any) map[string]any {
+	return map[string]any{
+		"tag":                "column_set",
+		"flex_mode":          "none",
+		"horizontal_spacing": "8px",
+		"columns": []any{map[string]any{
+			"tag":    "column",
+			"width":  "weighted",
+			"weight": 1,
+			"elements": []any{map[string]any{
+				"tag":   "button",
+				"text":  map[string]string{"tag": "plain_text", "content": text},
+				"type":  buttonType,
+				"width": "fill",
+				"behaviors": []any{map[string]any{
+					"type":  "callback",
+					"value": value,
+				}},
+			}},
+		}},
+	}
 }

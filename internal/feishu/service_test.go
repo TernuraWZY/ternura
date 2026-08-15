@@ -37,6 +37,44 @@ func TestServeHTTPURLVerification(t *testing.T) {
 	}
 }
 
+func TestServeHTTPDispatchesCardAction(t *testing.T) {
+	service := NewService(Config{
+		Enabled:           true,
+		VerificationToken: "verify-token",
+	}, nil)
+	var received CardAction
+	service.SetCardActionHandler(func(_ context.Context, action CardAction) (CardActionResponse, error) {
+		received = action
+		return CardActionResponse{ToastType: "success", ToastContent: "已取消"}, nil
+	})
+	body := `{
+		"schema":"2.0",
+		"header":{"event_id":"evt-card","event_type":"card.action.trigger","token":"verify-token"},
+		"event":{
+			"operator":{"open_id":"ou_user"},
+			"action":{"value":{"action":"cancel_run","run_id":"run-1"}},
+			"context":{"open_message_id":"om_card","open_chat_id":"oc_chat"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/feishu/events", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	service.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if received.EventID != "evt-card" || received.MessageID != "om_card" || received.ChatID != "oc_chat" {
+		t.Fatalf("card action = %+v", received)
+	}
+	if received.Value["run_id"] != "run-1" {
+		t.Fatalf("card action value = %+v", received.Value)
+	}
+	if !strings.Contains(rec.Body.String(), "已取消") {
+		t.Fatalf("callback response = %s", rec.Body.String())
+	}
+}
+
 func TestDecodeIncomingTextMessage(t *testing.T) {
 	service := NewService(Config{
 		Enabled:           true,
@@ -187,8 +225,9 @@ func TestSessionIDForKeyIsDeterministic(t *testing.T) {
 }
 
 type sentRequest struct {
-	path string
-	body string
+	method string
+	path   string
+	body   string
 }
 
 func TestProcessAddsProcessingReactionWhenHandlerIsSlow(t *testing.T) {
@@ -317,6 +356,98 @@ func TestProcessSkipsProcessingReactionWhenHandlerIsFast(t *testing.T) {
 	}
 	if !strings.Contains(sent[0].body, "马上完成") {
 		t.Fatalf("final reply missing, got %s", sent[0].body)
+	}
+}
+
+func TestProcessUpdatesSingleProgressCardAndRemovesReaction(t *testing.T) {
+	var mu sync.Mutex
+	sent := make([]sentRequest, 0, 5)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"code":                0,
+				"tenant_access_token": "tenant-token",
+				"expire":              3600,
+			})
+		case "/open-apis/im/v1/messages/om_progress/reactions":
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			sent = append(sent, sentRequest{method: r.Method, path: r.URL.Path, body: string(body)})
+			mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0, "data": map[string]string{"reaction_id": "or_progress"}})
+		case "/open-apis/im/v1/messages/om_progress/reply":
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			sent = append(sent, sentRequest{method: r.Method, path: r.URL.Path, body: string(body)})
+			mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0, "data": map[string]string{"message_id": "om_progress_card"}})
+		case "/open-apis/im/v1/messages/om_progress_card":
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			sent = append(sent, sentRequest{method: r.Method, path: r.URL.Path, body: string(body)})
+			mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+		case "/open-apis/im/v1/messages/om_progress/reactions/or_progress":
+			mu.Lock()
+			sent = append(sent, sentRequest{method: r.Method, path: r.URL.Path})
+			mu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	continueHandler := make(chan struct{})
+	finishHandler := make(chan struct{})
+	done := make(chan struct{})
+	service := NewService(Config{
+		Enabled:                true,
+		AppID:                  "cli_xxx",
+		AppSecret:              "secret",
+		BaseURL:                server.URL,
+		ReplyToMessage:         true,
+		ProcessingReaction:     true,
+		ProcessingReactionType: "OneSecond",
+		ProcessingDelay:        10 * time.Millisecond,
+		ProgressCard:           true,
+	}, func(ctx context.Context, msg InboundMessage) (Reply, error) {
+		ReportProgress(ctx, ProgressUpdate{RunID: "run-progress", Stage: ProgressStageStarted, Detail: "已经收到"})
+		<-continueHandler
+		ReportProgress(ctx, ProgressUpdate{Stage: ProgressStageTool, Detail: "正在调用 `web_search`", ToolCalls: 1})
+		<-finishHandler
+		return Reply{Content: "处理完成"}, nil
+	})
+
+	go func() {
+		defer close(done)
+		service.process(context.Background(), InboundMessage{
+			MessageID:     "om_progress",
+			ReceiveIDType: "chat_id",
+			ReceiveID:     "oc_group",
+		})
+	}()
+
+	waitForSentMessages(t, &mu, &sent, 2)
+	close(continueHandler)
+	waitForSentMessages(t, &mu, &sent, 3)
+	close(finishHandler)
+	<-done
+	waitForSentMessages(t, &mu, &sent, 5)
+
+	if !strings.Contains(sent[1].body, "cancel_run") || !strings.Contains(sent[1].body, "run-progress") {
+		t.Fatalf("progress card should contain the cancel action: %s", sent[1].body)
+	}
+	if sent[2].method != http.MethodPatch || !strings.Contains(sent[2].body, "web_search") {
+		t.Fatalf("progress update should patch the same card: %+v", sent[2])
+	}
+	if sent[3].method != http.MethodDelete {
+		t.Fatalf("processing reaction should be removed: %+v", sent[3])
+	}
+	if sent[4].method != http.MethodPatch || !strings.Contains(sent[4].body, "处理完成") {
+		t.Fatalf("final answer should replace the progress card: %+v", sent[4])
 	}
 }
 

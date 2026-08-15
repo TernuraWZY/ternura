@@ -31,6 +31,7 @@ type agentSessionRunRequest struct {
 	DirectResult   *agent.AgentRunResult
 	DirectErr      error
 	OmitMessages   bool
+	OnStart        func(runLifecycle)
 }
 
 type agentSessionRunOutcome struct {
@@ -52,6 +53,7 @@ func (s *agentSession) agent() *agent.Agent {
 		s.server.modelConf,
 		s.server.newSkillRegistry(s.sessionID, s.cronTool),
 		agent.WithCheckpointStore(s.server.checkpoints),
+		agent.WithAdditionalHooks(newFeishuProgressHook()),
 	)
 
 	snapshot := s.server.store.Snapshot()
@@ -70,6 +72,9 @@ func (s *agentSession) run(ctx context.Context, request agentSessionRunRequest) 
 	run, err := s.startRun(request)
 	if err != nil {
 		return agentSessionRunOutcome{Run: run, Err: err}
+	}
+	if request.OnStart != nil {
+		request.OnStart(run)
 	}
 
 	result := agent.AgentRunResult{}
@@ -110,6 +115,8 @@ func failedAgentRunResult(result agent.AgentRunResult, err error) agent.AgentRun
 	if err != nil {
 		detail := strings.TrimSpace(err.Error())
 		switch {
+		case errors.Is(err, context.Canceled):
+			message = "这轮任务已取消。"
 		case strings.Contains(detail, "exceeds max steps"):
 			message = "这轮 Agent 在工具和推理循环里没有及时收口，已经达到最大步骤数，所以我停止了继续运行。\n\n可以把问题缩小一点，或者直接指定需要查询的信息，我会重新跑一轮。"
 		case detail != "":

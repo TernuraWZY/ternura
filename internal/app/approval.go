@@ -46,7 +46,7 @@ func parseApprovalCommand(content string) (approvalCommand, bool) {
 	}, true
 }
 
-func (s *agentSession) resumeApproval(ctx context.Context, displayMessage string, command approvalCommand) agentSessionRunOutcome {
+func (s *agentSession) resumeApproval(ctx context.Context, displayMessage string, command approvalCommand, onStart func(runLifecycle)) agentSessionRunOutcome {
 	pending, ok := s.server.store.PendingApprovalForSession(s.sessionID, command.CheckpointID)
 	if !ok || pending.PendingApproval == nil {
 		result := agent.AgentRunResult{Content: "当前会话没有等待确认的工具调用。"}
@@ -65,6 +65,9 @@ func (s *agentSession) resumeApproval(ctx context.Context, displayMessage string
 	})
 	if err != nil {
 		return agentSessionRunOutcome{Run: run, Err: err}
+	}
+	if onStart != nil {
+		onStart(run)
 	}
 	result, runErr := s.agent().ResumeWithTrace(
 		ctx,

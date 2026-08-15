@@ -6,6 +6,7 @@ import (
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkcallback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
@@ -34,6 +35,18 @@ func (s *Service) StartWebSocket(ctx context.Context) {
 			}
 			go s.process(context.Background(), *inbound)
 			return nil
+		}).
+		OnP2CardActionTrigger(func(ctx context.Context, event *larkcallback.CardActionTriggerEvent) (*larkcallback.CardActionTriggerResponse, error) {
+			action, ok := cardActionFromSDKEvent(event)
+			if !ok {
+				return nil, nil
+			}
+			response, err := s.dispatchCardAction(ctx, action)
+			if err != nil {
+				log.Printf("feishu card action failed: %v", err)
+				response = CardActionResponse{ToastType: "error", ToastContent: "操作失败，请稍后重试"}
+			}
+			return cardActionTriggerResponse(response), nil
 		})
 
 	client := larkws.NewClient(
@@ -63,6 +76,39 @@ func (s *Service) StartWebSocket(ctx context.Context) {
 	if err := client.Start(ctx); err != nil && ctx.Err() == nil {
 		log.Printf("feishu websocket stopped: %v", err)
 	}
+}
+
+func cardActionFromSDKEvent(event *larkcallback.CardActionTriggerEvent) (CardAction, bool) {
+	if event == nil || event.Event == nil || event.Event.Action == nil {
+		return CardAction{}, false
+	}
+	action := CardAction{Value: event.Event.Action.Value}
+	if event.EventV2Base != nil && event.EventV2Base.Header != nil {
+		action.EventID = event.EventV2Base.Header.EventID
+	}
+	if event.Event.Operator != nil {
+		action.OperatorOpenID = event.Event.Operator.OpenID
+	}
+	if event.Event.Context != nil {
+		action.MessageID = event.Event.Context.OpenMessageID
+		action.ChatID = event.Event.Context.OpenChatID
+	}
+	return action, true
+}
+
+func cardActionTriggerResponse(response CardActionResponse) *larkcallback.CardActionTriggerResponse {
+	result := &larkcallback.CardActionTriggerResponse{}
+	if response.ToastContent != "" {
+		toastType := response.ToastType
+		if toastType == "" {
+			toastType = "info"
+		}
+		result.Toast = &larkcallback.Toast{Type: toastType, Content: response.ToastContent}
+	}
+	if response.Card != nil {
+		result.Card = &larkcallback.Card{Type: "card_json", Data: response.Card}
+	}
+	return result
 }
 
 func (s *Service) inboundFromSDKEvent(event *larkim.P2MessageReceiveV1) (*InboundMessage, bool, error) {
