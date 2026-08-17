@@ -81,6 +81,13 @@ type Reply struct {
 	Card    any
 }
 
+type ConnectionStatus struct {
+	Enabled     bool   `json:"enabled"`
+	Mode        string `json:"mode"`
+	Connected   bool   `json:"connected"`
+	ConnectedAt string `json:"connected_at,omitempty"`
+}
+
 func (r Reply) Empty() bool {
 	return r.Card == nil && strings.TrimSpace(r.Content) == ""
 }
@@ -93,10 +100,12 @@ type Service struct {
 	handleCardAction CardActionHandlerFunc
 	client           *http.Client
 
-	mu        sync.Mutex
-	token     tenantToken
-	processed []string
-	seen      map[string]struct{}
+	mu          sync.Mutex
+	token       tenantToken
+	processed   []string
+	seen        map[string]struct{}
+	connected   bool
+	connectedAt time.Time
 }
 
 type tenantToken struct {
@@ -149,6 +158,35 @@ func NewService(cfg Config, handle HandlerFunc) *Service {
 
 func (s *Service) Enabled() bool {
 	return s != nil && s.cfg.Enabled
+}
+
+func (s *Service) Status() ConnectionStatus {
+	if s == nil {
+		return ConnectionStatus{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status := ConnectionStatus{
+		Enabled:   s.cfg.Enabled,
+		Mode:      s.cfg.EventMode,
+		Connected: s.connected,
+	}
+	if !s.connectedAt.IsZero() {
+		status.ConnectedAt = s.connectedAt.Format(time.RFC3339Nano)
+	}
+	return status
+}
+
+func (s *Service) setConnected(connected bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.connected = connected
+	if connected {
+		s.connectedAt = time.Now()
+	}
+	s.mu.Unlock()
 }
 
 func (s *Service) WebSocketEnabled() bool {

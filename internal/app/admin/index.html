@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Ternura Runtime</title>
+  <link rel="stylesheet" href="/admin/app.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand-block">
+      <div class="brand-mark" aria-hidden="true">T</div>
+      <div>
+        <div class="brand-name">Ternura</div>
+        <div class="brand-subtitle">Agent Runtime</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <div id="live-state" class="live-state" data-state="connecting">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="live-state-text">正在连接</span>
+      </div>
+      <time id="updated-at" class="updated-at">--:--:--</time>
+      <button id="refresh-button" class="button button-secondary" type="button">刷新</button>
+    </div>
+  </header>
+
+  <nav class="tab-bar" aria-label="管理视图">
+    <button class="tab-button active" type="button" data-tab="overview">运行</button>
+    <button class="tab-button" type="button" data-tab="sessions">会话</button>
+    <button class="tab-button" type="button" data-tab="cron">定时任务</button>
+    <button class="tab-button" type="button" data-tab="system">系统</button>
+  </nav>
+
+  <main class="workspace">
+    <section id="tab-overview" class="tab-panel active" aria-label="运行状态">
+      <div id="metric-grid" class="metric-grid" aria-live="polite"></div>
+
+      <section class="data-section">
+        <div class="section-heading">
+          <div>
+            <h1>正在运行</h1>
+            <p id="active-summary">当前没有运行中的任务</p>
+          </div>
+        </div>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>来源</th>
+                <th>阶段</th>
+                <th>耗时</th>
+                <th>调用</th>
+                <th class="action-column">操作</th>
+              </tr>
+            </thead>
+            <tbody id="active-runs"></tbody>
+          </table>
+          <div id="active-empty" class="empty-state">当前没有运行中的任务</div>
+        </div>
+      </section>
+
+      <section id="approval-section" class="data-section hidden">
+        <div class="section-heading">
+          <div>
+            <h2>等待审批</h2>
+            <p>需要确认后才能继续的工具调用</p>
+          </div>
+          <span id="approval-count" class="count-badge">0</span>
+        </div>
+        <div id="approval-list" class="approval-list"></div>
+      </section>
+
+      <section class="data-section">
+        <div class="section-heading">
+          <div>
+            <h2>最近任务</h2>
+            <p>点击任务查看回答、过程记录和运行指标</p>
+          </div>
+          <div class="filter-group" role="group" aria-label="任务状态筛选">
+            <button class="filter-button active" type="button" data-status="all">全部</button>
+            <button class="filter-button" type="button" data-status="failed">失败</button>
+            <button class="filter-button" type="button" data-status="waiting_approval">待审批</button>
+          </div>
+        </div>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>状态</th>
+                <th>开始时间</th>
+                <th>耗时</th>
+                <th>产物</th>
+              </tr>
+            </thead>
+            <tbody id="recent-runs"></tbody>
+          </table>
+          <div id="recent-empty" class="empty-state hidden">没有符合条件的任务</div>
+        </div>
+      </section>
+    </section>
+
+    <section id="tab-sessions" class="tab-panel" aria-label="会话状态">
+      <section class="data-section first-section">
+        <div class="section-heading">
+          <div>
+            <h1>会话</h1>
+            <p>只展示会话规模与最近运行状态，不读取正文</p>
+          </div>
+          <span id="session-count" class="count-badge">0</span>
+        </div>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>会话</th>
+                <th>最近状态</th>
+                <th>消息</th>
+                <th>运行</th>
+                <th>待办</th>
+                <th>更新时间</th>
+              </tr>
+            </thead>
+            <tbody id="session-list"></tbody>
+          </table>
+          <div id="session-empty" class="empty-state">暂无会话</div>
+        </div>
+      </section>
+    </section>
+
+    <section id="tab-cron" class="tab-panel" aria-label="定时任务">
+      <section class="data-section first-section">
+        <div class="section-heading">
+          <div>
+            <h1>定时任务</h1>
+            <p>调度时间、投递目标与最近一次执行结果</p>
+          </div>
+          <span id="cron-count" class="count-badge">0</span>
+        </div>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>状态</th>
+                <th>计划</th>
+                <th>下次运行</th>
+                <th>最近结果</th>
+                <th>投递</th>
+              </tr>
+            </thead>
+            <tbody id="cron-list"></tbody>
+          </table>
+          <div id="cron-empty" class="empty-state">暂无定时任务</div>
+        </div>
+      </section>
+    </section>
+
+    <section id="tab-system" class="tab-panel" aria-label="系统信息">
+      <section class="system-band first-section">
+        <div class="section-heading">
+          <div>
+            <h1>系统</h1>
+            <p>当前守护进程加载的模型、连接与能力</p>
+          </div>
+        </div>
+        <dl id="system-list" class="system-list"></dl>
+      </section>
+    </section>
+  </main>
+
+  <aside id="run-drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-backdrop" data-close-drawer></div>
+    <div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+      <header class="drawer-header">
+        <div>
+          <div id="drawer-status" class="status-badge">--</div>
+          <h2 id="drawer-title">任务详情</h2>
+          <div id="drawer-run-id" class="mono muted"></div>
+        </div>
+        <button class="icon-button" type="button" data-close-drawer aria-label="关闭详情" title="关闭">×</button>
+      </header>
+      <div id="drawer-content" class="drawer-content"></div>
+    </div>
+  </aside>
+
+  <dialog id="auth-dialog" class="auth-dialog">
+    <form id="auth-form" method="dialog">
+      <h2>API 认证</h2>
+      <label for="api-token">TERNURA_API_TOKEN</label>
+      <input id="api-token" name="api-token" type="password" autocomplete="current-password">
+      <p id="auth-error" class="form-error hidden">Token 无效</p>
+      <div class="dialog-actions">
+        <button class="button button-primary" type="submit">连接</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <script src="/admin/app.js" defer></script>
+</body>
+</html>

@@ -69,8 +69,9 @@ func (s *agentSession) resumeApproval(ctx context.Context, displayMessage string
 	if onStart != nil {
 		onStart(run)
 	}
+	runCtx := withRuntimeRun(ctx, run.ID)
 	result, runErr := s.agent().ResumeWithTrace(
-		ctx,
+		runCtx,
 		pending.UserMessage,
 		pending.CheckpointID,
 		pending.PendingApproval.InterruptID,

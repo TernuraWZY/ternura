@@ -59,6 +59,7 @@ func (s *agentServer) newSkillRegistry(sessionID string, cronTool *tool.CronTool
 			registry.Register(skill)
 		}
 	}
+	s.captureRuntimeInventory(registry)
 	return registry
 }
 

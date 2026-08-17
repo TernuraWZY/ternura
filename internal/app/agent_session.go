@@ -53,7 +53,7 @@ func (s *agentSession) agent() *agent.Agent {
 		s.server.modelConf,
 		s.server.newSkillRegistry(s.sessionID, s.cronTool),
 		agent.WithCheckpointStore(s.server.checkpoints),
-		agent.WithAdditionalHooks(newFeishuProgressHook()),
+		agent.WithAdditionalHooks(newRuntimeProgressHook(s.server.runtime)),
 	)
 
 	snapshot := s.server.store.Snapshot()
@@ -76,13 +76,14 @@ func (s *agentSession) run(ctx context.Context, request agentSessionRunRequest) 
 	if request.OnStart != nil {
 		request.OnStart(run)
 	}
+	runCtx := withRuntimeRun(ctx, run.ID)
 
 	result := agent.AgentRunResult{}
 	runErr := request.DirectErr
 	if request.DirectResult != nil {
 		result = *request.DirectResult
 	} else {
-		result, runErr = s.runWithTrace(ctx, request.RuntimePrompt, run.ID)
+		result, runErr = s.runWithTrace(runCtx, request.RuntimePrompt, run.ID)
 	}
 	if runErr != nil {
 		result = failedAgentRunResult(result, runErr)
@@ -159,6 +160,7 @@ func (s *agentSession) startUserRun(message string) runLifecycle {
 	if err := s.server.store.StartRunForSession(s.sessionID, run, message); err != nil {
 		log.Printf("persist run start %s: %v", run.ID, err)
 	}
+	s.server.runtime.Start(run, s.sessionID, runtimeSourceForSession(s.sessionID), message, runtimeStageStarted)
 	return run
 }
 
@@ -170,6 +172,7 @@ func (s *agentSession) startScheduledRun(displayPrompt string) (runLifecycle, er
 		logRunFinish(run, runStatusFailed, finished)
 		return run, err
 	}
+	s.server.runtime.Start(run, s.sessionID, "cron", displayPrompt, runtimeStageStarted)
 	return run, nil
 }
 
@@ -180,6 +183,7 @@ func (s *agentSession) finishUserRun(run runLifecycle, message string, result ag
 	if err := s.server.store.FinishRunForSession(s.sessionID, run, message, result, status, finished, runErr); err != nil {
 		log.Printf("persist run %s: %v", run.ID, err)
 	}
+	s.server.runtime.Finish(run.ID, status, result, runErr)
 }
 
 func (s *agentSession) finishUserRunWithoutMessages(run runLifecycle, message string, result agent.AgentRunResult) {
@@ -188,6 +192,7 @@ func (s *agentSession) finishUserRunWithoutMessages(run runLifecycle, message st
 	if err := s.server.store.FinishRunForSessionWithoutMessages(s.sessionID, run, message, result, runStatusSucceeded, finished, nil); err != nil {
 		log.Printf("persist run %s: %v", run.ID, err)
 	}
+	s.server.runtime.Finish(run.ID, runStatusSucceeded, result, nil)
 }
 
 func (s *agentSession) finishScheduledRun(run runLifecycle, displayPrompt string, runtimePrompt string, result agent.AgentRunResult, runErr error) {
@@ -197,6 +202,14 @@ func (s *agentSession) finishScheduledRun(run runLifecycle, displayPrompt string
 	if err := s.server.store.FinishScheduledRunForSession(s.sessionID, run, displayPrompt, runtimePrompt, result, status, finished, runErr); err != nil {
 		log.Printf("persist cron run %s: %v", run.ID, err)
 	}
+	s.server.runtime.Finish(run.ID, status, result, runErr)
+}
+
+func runtimeSourceForSession(sessionID string) string {
+	if strings.HasPrefix(strings.TrimSpace(sessionID), "feishu-") {
+		return "feishu"
+	}
+	return "api"
 }
 
 func agentRunStatus(result agent.AgentRunResult, runErr error) string {

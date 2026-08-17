@@ -56,18 +56,22 @@ func (s *Service) StartWebSocket(ctx context.Context) {
 		larkws.WithDomain(s.cfg.BaseURL),
 		larkws.WithLogLevel(larkcore.LogLevelWarn),
 		larkws.WithOnReady(func() {
+			s.setConnected(true)
 			log.Printf("feishu websocket connected")
 		}),
 		larkws.WithOnError(func(err error) {
+			s.setConnected(false)
 			log.Printf("feishu websocket error: %v", err)
 		}),
 		larkws.WithOnReconnecting(func() {
 			log.Printf("feishu websocket reconnecting")
 		}),
 		larkws.WithOnReconnected(func() {
+			s.setConnected(true)
 			log.Printf("feishu websocket reconnected")
 		}),
 		larkws.WithOnDisconnected(func() {
+			s.setConnected(false)
 			log.Printf("feishu websocket disconnected")
 		}),
 	)

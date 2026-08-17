@@ -96,10 +96,13 @@ type agentServer struct {
 	cronWake             chan struct{}
 	feishu               *feishu.Service
 	mcpRuntime           *mcpruntime.Runtime
+	runtime              *runtimeMonitor
 	ctx                  context.Context
 	taskMu               sync.Mutex
 	taskCancels          map[string]context.CancelFunc
 	taskSessionLocks     map[string]*sync.Mutex
+	inventoryMu          sync.RWMutex
+	inventory            runtimeInventorySnapshot
 }
 
 func newAgentServer(modelConf config.ModelConfig) *agentServer {
@@ -111,6 +114,7 @@ func newAgentServerWithContext(ctx context.Context, modelConf config.ModelConfig
 		modelConf:        modelConf,
 		store:            newSessionStore(defaultSessionPath),
 		cronWake:         make(chan struct{}, 1),
+		runtime:          newRuntimeMonitor(),
 		ctx:              ctx,
 		taskCancels:      make(map[string]context.CancelFunc),
 		taskSessionLocks: make(map[string]*sync.Mutex),
@@ -167,9 +171,15 @@ func (s *agentServer) routes() http.Handler {
 	mux.Handle("/api/feishu/events", s.feishu)
 	mux.HandleFunc("/api/tasks", s.handleTasks)
 	mux.HandleFunc("/api/tasks/", s.handleTask)
+	mux.HandleFunc("/api/runtime", s.handleRuntime)
+	mux.HandleFunc("/api/events", s.handleRuntimeEvents)
+	mux.HandleFunc("/api/sessions", s.handleSessions)
+	mux.HandleFunc("/api/cron/jobs", s.handleCronJobs)
+	mux.HandleFunc("/api/system/", s.handleSystemDetail)
 	mux.HandleFunc("/api/agent-card", s.handleAgentCard)
 	mux.HandleFunc("/.well-known/agent-card.json", s.handleAgentCard)
 	mux.HandleFunc("/healthz", s.handleHealth)
+	s.registerAdminRoutes(mux)
 	return mux
 }
 

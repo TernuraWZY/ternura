@@ -150,6 +150,7 @@ func (s *agentServer) startAsyncTask(sessionID string, input string) (runLifecyc
 	if err := s.store.StartRunForSession(sessionID, run, input); err != nil {
 		return run, sessionID, err
 	}
+	s.runtime.Start(run, sessionID, "api", input, runtimeStageQueued)
 
 	runCtx, cancel := context.WithCancel(s.serverContext())
 	s.trackTask(run.ID, cancel)
@@ -159,7 +160,9 @@ func (s *agentServer) startAsyncTask(sessionID string, input string) (runLifecyc
 		lock.Lock()
 		defer lock.Unlock()
 
-		result, runErr := session.runWithTrace(runCtx, input, run.ID)
+		executionCtx := withRuntimeRun(runCtx, run.ID)
+		s.runtime.Update(run.ID, runtimeStageStarted, "运行已经开始", agent.RunMetrics{})
+		result, runErr := session.runWithTrace(executionCtx, input, run.ID)
 		if runErr != nil {
 			result = failedAgentRunResult(result, runErr)
 		}
@@ -182,6 +185,7 @@ func (s *agentServer) startAsyncTaskDecision(runID string, decision taskDecision
 	if err := s.store.StartRunForSession(sessionID, run, display); err != nil {
 		return run, err
 	}
+	s.runtime.Start(run, sessionID, "api", display, runtimeStageQueued)
 
 	runCtx, cancel := context.WithCancel(s.serverContext())
 	s.trackTask(run.ID, cancel)
@@ -192,8 +196,10 @@ func (s *agentServer) startAsyncTaskDecision(runID string, decision taskDecision
 		defer lock.Unlock()
 
 		session := s.newAgentSession(sessionID, nil)
+		executionCtx := withRuntimeRun(runCtx, run.ID)
+		s.runtime.Update(run.ID, runtimeStageStarted, "正在恢复审批检查点", agent.RunMetrics{})
 		result, runErr := session.agent().ResumeWithTrace(
-			runCtx,
+			executionCtx,
 			pending.UserMessage,
 			pending.CheckpointID,
 			pending.PendingApproval.InterruptID,
