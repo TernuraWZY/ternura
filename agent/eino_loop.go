@@ -106,8 +106,12 @@ func (a *Agent) newEinoAgentRun(ctx context.Context, runCtx *RunContext, result 
 }
 
 func (r *einoAgentRun) Generate(ctx context.Context) (*schema.Message, error) {
+	return r.GenerateWithOptions(ctx)
+}
+
+func (r *einoAgentRun) GenerateWithOptions(ctx context.Context, runOptions ...adk.AgentRunOption) (*schema.Message, error) {
 	log.Printf("calling Eino ADK agent with model %s...", r.agent.model)
-	iter, err := r.startADKRun(ctx, cloneMessages(r.agent.messages))
+	iter, err := r.startADKRun(ctx, cloneMessages(r.agent.messages), runOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +122,7 @@ func (r *einoAgentRun) Generate(ctx context.Context) (*schema.Message, error) {
 
 	compacted := r.reactiveCompactHistory(ctx, r.contextBuilder(), cloneMessages(r.agent.messages))
 	r.agent.messages = compacted
-	iter, startErr := r.startADKRun(ctx, compacted)
+	iter, startErr := r.startADKRun(ctx, compacted, runOptions...)
 	if startErr != nil {
 		return nil, startErr
 	}
@@ -264,6 +268,15 @@ func (r *einoAgentRun) beforeModelCall(ctx context.Context) error {
 	}
 	if err := r.agent.hooks.BeforeModelCall(ctx, r.runCtx); err != nil {
 		return err
+	}
+	if r.runCtx != nil {
+		r.runCtx.SetContextBlockWithPriority(
+			"evidence-ledger",
+			"Evidence Ledger",
+			r.runCtx.EvidenceContextText(),
+			RuntimeContextPriorityHigh,
+			6000,
+		)
 	}
 
 	_, available := r.agent.enabledToolsForRun(r.runCtx)

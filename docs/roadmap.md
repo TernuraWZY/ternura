@@ -7,6 +7,7 @@
 ### Agent runtime
 
 - Eino ADK `ChatModelAgent + Runner` ReAct 编排。
+- Eino ADK `TurnLoop` 同 Session 运行中纠偏和安全点抢占。
 - Eino 原生 Tool、并行工具调用和动态 `tool_search`。
 - 模型重试与可选 fallback model。
 - MCP `stdio` / Streamable HTTP 工具接入。
@@ -17,6 +18,7 @@
 - 每次请求生成统一 `run_id`。
 - PI-style AgentSession 统一 Feishu、Task API 和 cron 的 start/run/finish。
 - 可恢复 session、运行历史、trace、metrics 和 Artifact。
+- 只恢复清洗后的完整 user/assistant Turn。
 - 异步 Task 创建、查询和取消。
 - Eino checkpoint/interrupt 工具审批与恢复。
 - `update_todos` 任务步骤持久化。
@@ -36,6 +38,7 @@
 - ReAct、模型、工具和 Web 调用预算。
 - 伪工具文本、真实副作用和 cron 状态归因保护。
 - Web Search 与 Web Fetch 的证据边界。
+- Tool 结果结构化 Evidence Ledger，并贯通模型、飞书、Task API 和管理页。
 
 ### Channel 与调度
 

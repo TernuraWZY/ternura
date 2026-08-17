@@ -33,6 +33,7 @@ const stageLabels = {
   started: "准备运行",
   thinking: "模型思考",
   tool: "工具调用",
+  correcting: "运行中纠偏",
   finishing: "整理结果",
 };
 
@@ -634,6 +635,7 @@ async function openRunDrawer(runID) {
 function renderRunDetail(run) {
   const metrics = run.metrics || {};
   const trace = run.trace || [];
+  const evidence = run.evidence || [];
   const artifacts = run.artifacts || [];
   const badge = element("drawer-status");
   badge.className = `status-badge status-${safeClass(run.status)}`;
@@ -671,6 +673,24 @@ function renderRunDetail(run) {
     </div>
   `).join("") : '<div class="muted">没有产物</div>';
 
+  const evidenceHTML = evidence.length ? evidence.map((item) => `
+    <details class="trace-item">
+      <summary>
+        ${statusBadge(item.status || "succeeded")}
+        <span>${escapeHTML(`[${item.id || "E?"}] ${item.title || item.tool || "证据"}`)}</span>
+        <span class="muted">${escapeHTML(item.citable ? "可引用" : "发现/审计")}</span>
+      </summary>
+      <div class="inventory-content">
+        ${detailMetadataRow("类型", item.kind || "--")}
+        ${detailMetadataRow("工具", item.tool || "--", true)}
+        ${item.url ? `<div class="inventory-meta"><span>来源</span><a class="evidence-url" href="${escapeHTML(item.url)}" target="_blank" rel="noreferrer">${escapeHTML(item.url)}</a></div>` : ""}
+        ${detailMetadataRow("采集时间", formatTime(item.retrieved_at))}
+        ${detailMetadataRow("内容哈希", item.content_hash || "--", true)}
+        ${item.excerpt ? `<p class="detail-text evidence-excerpt">${escapeHTML(item.excerpt)}</p>` : ""}
+      </div>
+    </details>
+  `).join("") : '<div class="muted">本轮没有工具证据</div>';
+
   element("drawer-content").innerHTML = `
     <section class="detail-block">
       <h3>输入</h3>
@@ -688,6 +708,10 @@ function renderRunDetail(run) {
     <section class="detail-block">
       <h3>过程记录</h3>
       <div class="trace-list">${traceHTML}</div>
+    </section>
+    <section class="detail-block">
+      <h3>证据账本</h3>
+      <div class="trace-list">${evidenceHTML}</div>
     </section>
     <section class="detail-block">
       <h3>产物</h3>

@@ -155,12 +155,20 @@ func (s *agentSession) finishRun(run runLifecycle, request agentSessionRunReques
 }
 
 func (s *agentSession) startUserRun(message string) runLifecycle {
+	return s.startUserRunAtStage(message, runtimeStageStarted)
+}
+
+func (s *agentSession) queueUserRun(message string) runLifecycle {
+	return s.startUserRunAtStage(message, runtimeStageQueued)
+}
+
+func (s *agentSession) startUserRunAtStage(message string, stage string) runLifecycle {
 	run := newRunLifecycle()
 	logRunStart(run)
 	if err := s.server.store.StartRunForSession(s.sessionID, run, message); err != nil {
 		log.Printf("persist run start %s: %v", run.ID, err)
 	}
-	s.server.runtime.Start(run, s.sessionID, runtimeSourceForSession(s.sessionID), message, runtimeStageStarted)
+	s.server.runtime.Start(run, s.sessionID, runtimeSourceForSession(s.sessionID), message, stage)
 	return run
 }
 
@@ -177,10 +185,14 @@ func (s *agentSession) startScheduledRun(displayPrompt string) (runLifecycle, er
 }
 
 func (s *agentSession) finishUserRun(run runLifecycle, message string, result agent.AgentRunResult, runErr error) {
+	s.finishUserRunWithRuntimePrompt(run, message, message, result, runErr)
+}
+
+func (s *agentSession) finishUserRunWithRuntimePrompt(run runLifecycle, displayMessage string, runtimePrompt string, result agent.AgentRunResult, runErr error) {
 	finished := time.Now()
 	status := agentRunStatus(result, runErr)
 	logRunFinish(run, status, finished)
-	if err := s.server.store.FinishRunForSession(s.sessionID, run, message, result, status, finished, runErr); err != nil {
+	if err := s.server.store.FinishRunForSessionWithRuntimeMessage(s.sessionID, run, displayMessage, runtimePrompt, result, status, finished, runErr); err != nil {
 		log.Printf("persist run %s: %v", run.ID, err)
 	}
 	s.server.runtime.Finish(run.ID, status, result, runErr)

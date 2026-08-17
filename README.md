@@ -13,24 +13,26 @@ Ternura 是一个使用 Go 和 Eino ADK 构建的轻量级通用 Agent。它把�
 ### Agent runtime
 
 - Eino ADK `ChatModelAgent + Runner` 原生 ReAct 编排。
+- Eino ADK `TurnLoop` 驱动同一 Session 的运行中补充与安全点抢占。
 - Eino 原生 Tool、并行工具调用、动态 `tool_search` 和 MCP Tool。
 - 模型重试、fallback model、运行预算和上下文超限恢复。
 - checkpoint/interrupt 高风险工具审批与恢复。
 
 ### 上下文与记忆
 
-- 保持 user/assistant/tool 语义链的 ContextBuilder。
+- 按完整 user/assistant Turn 恢复历史，并保持 user/assistant/tool 语义链的 ContextBuilder。
 - 大工具结果落盘、分层压缩和 LLM summary compact。
+- 结构化 Evidence Ledger，区分可引用来源、发现线索和工具执行观察。
 - 按 query 召回并由 AI summarizer 判断是否注入的 Active Memory。
 - session 短期记忆与显式长期记忆。
 
 ### 运行与集成
 
-- 可恢复 session、结构化 trace/metrics、Artifact 和异步 Task API。
+- 可恢复 session、结构化 trace/evidence/metrics、Artifact 和异步 Task API。
 - 飞书 WebSocket / HTTP Channel、Reaction、进度卡片和话题隔离。
 - one-shot、interval、cron schedule 和结果回传。
 - OpenClaw / AgentSkills 风格 `SKILL.md` 与声明式委派 Agent。
-- 内嵌 Runtime 管理页，实时查看任务、审批、会话、cron 和系统状态。
+- 内嵌 Runtime 管理页，实时查看任务、证据、审批、会话、cron 和系统状态。
 
 ## 快速开始
 

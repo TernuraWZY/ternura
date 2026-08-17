@@ -145,30 +145,8 @@ func (s *agentServer) startAsyncTask(sessionID string, input string) (runLifecyc
 		return runLifecycle{}, "", err
 	}
 	session := s.newAgentSession(sessionID, nil)
-	run := newRunLifecycle()
-	logRunStart(run)
-	if err := s.store.StartRunForSession(sessionID, run, input); err != nil {
-		return run, sessionID, err
-	}
-	s.runtime.Start(run, sessionID, "api", input, runtimeStageQueued)
-
-	runCtx, cancel := context.WithCancel(s.serverContext())
-	s.trackTask(run.ID, cancel)
-	go func() {
-		defer s.untrackTask(run.ID)
-		lock := s.taskSessionLock(sessionID)
-		lock.Lock()
-		defer lock.Unlock()
-
-		executionCtx := withRuntimeRun(runCtx, run.ID)
-		s.runtime.Update(run.ID, runtimeStageStarted, "运行已经开始", agent.RunMetrics{})
-		result, runErr := session.runWithTrace(executionCtx, input, run.ID)
-		if runErr != nil {
-			result = failedAgentRunResult(result, runErr)
-		}
-		session.finishUserRun(run, input, result, runErr)
-	}()
-	return run, sessionID, nil
+	queued, err := s.enqueueSessionTurn(s.serverContext(), session, input)
+	return queued.Run(), sessionID, err
 }
 
 func (s *agentServer) startAsyncTaskDecision(runID string, decision taskDecisionRequest) (runLifecycle, error) {
@@ -303,12 +281,13 @@ func (s *agentServer) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 			"agent_card": "/api/agent-card",
 		},
 		"capabilities": map[string]bool{
-			"tasks":          true,
-			"artifacts":      true,
-			"cancellation":   true,
-			"human_approval": true,
-			"checkpointing":  true,
-			"mcp":            s.mcpRuntime != nil && len(s.mcpRuntime.Tools()) > 0,
+			"tasks":           true,
+			"artifacts":       true,
+			"cancellation":    true,
+			"live_correction": true,
+			"human_approval":  true,
+			"checkpointing":   true,
+			"mcp":             s.mcpRuntime != nil && len(s.mcpRuntime.Tools()) > 0,
 		},
 	})
 }

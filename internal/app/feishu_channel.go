@@ -16,48 +16,66 @@ func (s *agentServer) handleFeishuMessage(ctx context.Context, msg feishu.Inboun
 	sessionID := feishu.SessionIDForKey(msg.SessionKey)
 	delivery := feishuDeliveryTarget(msg)
 
-	lock := s.taskSessionLock(sessionID)
-	lock.Lock()
-	defer lock.Unlock()
-
-	return s.runTrackedFeishuTurn(ctx, func(runCtx context.Context, onStart func(runLifecycle)) (feishu.Reply, error) {
-		if messageRequestsNewSession(msg.Content) {
+	if messageRequestsNewSession(msg.Content) {
+		s.stopSessionTurnLoop(sessionID, "new session requested")
+		lock := s.taskSessionLock(sessionID)
+		lock.Lock()
+		defer lock.Unlock()
+		return s.runTrackedFeishuTurn(ctx, func(runCtx context.Context, onStart func(runLifecycle)) (feishu.Reply, error) {
 			return s.resetFeishuSession(runCtx, sessionID, msg, onStart)
-		}
-
-		if _, err := s.store.EnsureSession(sessionID, feishu.SessionTitle(msg)); err != nil {
-			return feishu.Reply{}, err
-		}
-
-		session := s.newAgentSession(sessionID, nil)
-		if command, ok := parseApprovalCommand(msg.Content); ok {
-			return formatFeishuOutcomeForSession(sessionID, session.resumeApproval(runCtx, msg.Content, command, onStart))
-		}
-
-		if result, handled, err := s.tryScheduleShortcutForSession(runCtx, msg.Content, sessionID, delivery); handled {
-			outcome := session.run(runCtx, agentSessionRunRequest{
-				Kind:           agentSessionRunUser,
-				DisplayMessage: msg.Content,
-				DirectResult:   &result,
-				DirectErr:      err,
-				OnStart:        onStart,
-			})
-			return formatFeishuOutcomeForSession(sessionID, outcome)
-		}
-
-		cronTool := tool.NewCronTool(
-			s.cronAddForSessionWithDelivery(sessionID, delivery),
-			s.cronList,
-			s.cronRemove,
-		)
-		session.cronTool = cronTool
-		outcome := session.run(runCtx, agentSessionRunRequest{
-			Kind:           agentSessionRunUser,
-			DisplayMessage: msg.Content,
-			OnStart:        onStart,
 		})
-		return formatFeishuOutcomeForSession(sessionID, outcome)
+	}
+
+	if _, err := s.store.EnsureSession(sessionID, feishu.SessionTitle(msg)); err != nil {
+		return feishu.Reply{}, err
+	}
+
+	session := s.newAgentSession(sessionID, nil)
+	if command, ok := parseApprovalCommand(msg.Content); ok {
+		lock := s.taskSessionLock(sessionID)
+		lock.Lock()
+		defer lock.Unlock()
+		return s.runTrackedFeishuTurn(ctx, func(runCtx context.Context, onStart func(runLifecycle)) (feishu.Reply, error) {
+			return formatFeishuOutcomeForSession(sessionID, session.resumeApproval(runCtx, msg.Content, command, onStart))
+		})
+	}
+
+	if !s.sessionTurnLoopBusy(sessionID) {
+		lock := s.taskSessionLock(sessionID)
+		lock.Lock()
+		if result, handled, err := s.tryScheduleShortcutForSession(ctx, msg.Content, sessionID, delivery); handled {
+			defer lock.Unlock()
+			return s.runTrackedFeishuTurn(ctx, func(runCtx context.Context, onStart func(runLifecycle)) (feishu.Reply, error) {
+				outcome := session.run(runCtx, agentSessionRunRequest{
+					Kind:           agentSessionRunUser,
+					DisplayMessage: msg.Content,
+					DirectResult:   &result,
+					DirectErr:      err,
+					OnStart:        onStart,
+				})
+				return formatFeishuOutcomeForSession(sessionID, outcome)
+			})
+		}
+		lock.Unlock()
+	}
+
+	cronTool := tool.NewCronTool(
+		s.cronAddForSessionWithDelivery(sessionID, delivery),
+		s.cronList,
+		s.cronRemove,
+	)
+	session.cronTool = cronTool
+	queued, err := s.enqueueSessionTurn(ctx, session, msg.Content)
+	if err != nil {
+		return feishu.Reply{}, err
+	}
+	run := queued.Run()
+	feishu.ReportProgress(ctx, feishu.ProgressUpdate{
+		RunID:  run.ID,
+		Stage:  feishu.ProgressStageStarted,
+		Detail: "已经收到，正在准备处理",
 	})
+	return formatFeishuOutcomeForSession(sessionID, queued.Wait(ctx))
 }
 
 func (s *agentServer) runTrackedFeishuTurn(ctx context.Context, run func(context.Context, func(runLifecycle)) (feishu.Reply, error)) (feishu.Reply, error) {

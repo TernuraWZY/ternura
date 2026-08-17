@@ -100,7 +100,7 @@ func defaultModelRetryConfig() *adk.ModelRetryConfig {
 	}
 }
 
-func (r *einoAgentRun) startADKRun(ctx context.Context, messages []*schema.Message) (*adk.AsyncIterator[*adk.AgentEvent], error) {
+func (r *einoAgentRun) startADKRun(ctx context.Context, messages []*schema.Message, runOptions ...adk.AgentRunOption) (*adk.AsyncIterator[*adk.AgentEvent], error) {
 	if r == nil || r.runner == nil {
 		return nil, errors.New("Eino ADK runner is not initialized")
 	}
@@ -119,7 +119,7 @@ func (r *einoAgentRun) startADKRun(ctx context.Context, messages []*schema.Messa
 		})
 	}
 
-	options := make([]adk.AgentRunOption, 0, 1)
+	options := append([]adk.AgentRunOption(nil), runOptions...)
 	if checkpointID != "" {
 		options = append(options, adk.WithCheckPointID(checkpointID))
 	}

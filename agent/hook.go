@@ -67,6 +67,7 @@ type RunContext struct {
 	contextBlocks    []RuntimeContextBlock
 	disabledTools    map[tool.AgentTool]string
 	toolResults      []ToolExecution
+	evidence         []EvidenceRecord
 	toolPolicy       ToolPolicy
 	toolPolicyMu     sync.RWMutex
 	budgetMu         sync.RWMutex
@@ -431,10 +432,29 @@ func (r *RunContext) ToolResults() []ToolExecution {
 	return results
 }
 
+func (r *RunContext) Evidence() []EvidenceRecord {
+	if r == nil {
+		return nil
+	}
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	if len(r.evidence) == 0 {
+		return nil
+	}
+	records := make([]EvidenceRecord, len(r.evidence))
+	copy(records, r.evidence)
+	return records
+}
+
+func (r *RunContext) EvidenceContextText() string {
+	return renderEvidenceContext(r.Evidence())
+}
+
 func (r *RunContext) recordToolResult(result ToolResult) {
 	if r == nil {
 		return
 	}
+	records := evidenceRecordsFromToolResult(result)
 	r.stateMu.Lock()
 	defer r.stateMu.Unlock()
 	r.toolResults = append(r.toolResults, ToolExecution{
@@ -442,6 +462,10 @@ func (r *RunContext) recordToolResult(result ToolResult) {
 		Content: result.Content,
 		Error:   result.ErrorString(),
 	})
+	for _, record := range records {
+		record.ID = fmt.Sprintf("E%d", len(r.evidence)+1)
+		r.evidence = append(r.evidence, record)
+	}
 }
 
 func (r *RunContext) RuntimeContextText() string {

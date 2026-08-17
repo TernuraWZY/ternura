@@ -48,6 +48,7 @@ type persistedRun struct {
 	TriggerKind     string                     `json:"trigger_kind,omitempty"`
 	Content         string                     `json:"content,omitempty"`
 	Trace           []agent.AgentTraceItem     `json:"trace,omitempty"`
+	Evidence        []agent.EvidenceRecord     `json:"evidence,omitempty"`
 	RawContent      string                     `json:"raw_content,omitempty"`
 	ModelInput      []agent.ModelInputSnapshot `json:"model_input,omitempty"`
 	CheckpointID    string                     `json:"checkpoint_id,omitempty"`
@@ -258,6 +259,10 @@ func (s *sessionStore) FinishRunForSession(sessionID string, run runLifecycle, u
 	return s.finishRunLocked(sessionID, run, userMessage, userMessage, runTriggerKindUser, result, status, finishedAt, runErr)
 }
 
+func (s *sessionStore) FinishRunForSessionWithRuntimeMessage(sessionID string, run runLifecycle, displayMessage string, runtimeMessage string, result agent.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
+	return s.finishRunLocked(sessionID, run, displayMessage, runtimeMessage, runTriggerKindUser, result, status, finishedAt, runErr)
+}
+
 func (s *sessionStore) FinishRunForSessionWithoutMessages(sessionID string, run runLifecycle, userMessage string, result agent.AgentRunResult, status string, finishedAt time.Time, runErr error) error {
 	return s.finishRunLocked(sessionID, run, userMessage, "", runTriggerKindUser, result, status, finishedAt, runErr)
 }
@@ -290,6 +295,7 @@ func (s *sessionStore) finishRunLocked(sessionID string, run runLifecycle, displ
 		TriggerKind:     normalizeTriggerKind(triggerKind),
 		Content:         result.Content,
 		Trace:           result.Trace,
+		Evidence:        append([]agent.EvidenceRecord(nil), result.Evidence...),
 		RawContent:      result.RawContent,
 		ModelInput:      result.ModelInput,
 		CheckpointID:    result.CheckpointID,
@@ -1089,6 +1095,7 @@ func cloneRuns(runs []persistedRun) []persistedRun {
 	for idx, run := range runs {
 		cloned[idx] = run
 		cloned[idx].Trace = append([]agent.AgentTraceItem(nil), run.Trace...)
+		cloned[idx].Evidence = append([]agent.EvidenceRecord(nil), run.Evidence...)
 		cloned[idx].Artifacts = append([]agent.AgentArtifact(nil), run.Artifacts...)
 		if run.Metrics.ToolCallsByName != nil {
 			cloned[idx].Metrics.ToolCallsByName = make(map[string]int, len(run.Metrics.ToolCallsByName))

@@ -37,6 +37,7 @@ type Agent struct {
 type AgentRunResult struct {
 	Content         string               `json:"content"`
 	Trace           []AgentTraceItem     `json:"trace,omitempty"`
+	Evidence        []EvidenceRecord     `json:"evidence,omitempty"`
 	RawContent      string               `json:"raw_content,omitempty"`
 	ModelInput      []ModelInputSnapshot `json:"model_input,omitempty"`
 	CheckpointID    string               `json:"checkpoint_id,omitempty"`
@@ -115,6 +116,7 @@ type AgentStreamEvent struct {
 	Delta      string               `json:"delta,omitempty"`
 	Content    string               `json:"content,omitempty"`
 	Trace      []AgentTraceItem     `json:"trace,omitempty"`
+	Evidence   []EvidenceRecord     `json:"evidence,omitempty"`
 	RawContent string               `json:"raw_content,omitempty"`
 	Error      string               `json:"error,omitempty"`
 	Approval   *ToolApprovalRequest `json:"approval,omitempty"`
@@ -263,6 +265,10 @@ func (a *Agent) ResumeWithTrace(ctx context.Context, query string, checkpointID 
 }
 
 func (a *Agent) runMessageWithTrace(ctx context.Context, userMessage *schema.Message, checkpointID string, resume *adkResumeRequest) (result AgentRunResult, runErr error) {
+	return a.runMessageWithTraceOptions(ctx, userMessage, checkpointID, resume, nil)
+}
+
+func (a *Agent) runMessageWithTraceOptions(ctx context.Context, userMessage *schema.Message, checkpointID string, resume *adkResumeRequest, runOptions []adk.AgentRunOption) (result AgentRunResult, runErr error) {
 	query := userMessageText(userMessage)
 	runCtx := NewRunContext(query, RunModeSync)
 	runCtx.SetRunLimits(a.runLimits)
@@ -277,6 +283,7 @@ func (a *Agent) runMessageWithTrace(ctx context.Context, userMessage *schema.Mes
 	}
 	defer func() {
 		result.Metrics = runCtx.RunMetrics()
+		result.Evidence = runCtx.Evidence()
 		if err := a.hooks.AfterRun(ctx, runCtx, result, runErr); err != nil && runErr == nil {
 			runErr = err
 		}
@@ -301,14 +308,14 @@ func (a *Agent) runMessageWithTrace(ctx context.Context, userMessage *schema.Mes
 			}
 			return result, err
 		}
-		message, err := runtime.Generate(ctx)
+		message, err := runtime.GenerateWithOptions(ctx, runOptions...)
 		if err != nil {
 			if errors.Is(err, ErrRunBudgetExceeded) {
 				result.Content = budgetExceededFinalMessage(err)
 				result.Trace = append(result.Trace, budgetExceededTrace(err))
 				return result, nil
 			}
-			return AgentRunResult{}, err
+			return result, err
 		}
 		if message == nil {
 			return result, nil
@@ -364,6 +371,7 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 	}
 	defer func() {
 		result.Metrics = runCtx.RunMetrics()
+		result.Evidence = runCtx.Evidence()
 		if err := a.hooks.AfterRun(ctx, runCtx, result, runErr); err != nil && runErr == nil {
 			runErr = err
 		}
@@ -421,6 +429,7 @@ func (a *Agent) RunStreaming(ctx context.Context, query string, emit func(AgentS
 			Type:       "done",
 			Content:    result.Content,
 			Trace:      result.Trace,
+			Evidence:   runCtx.Evidence(),
 			RawContent: result.RawContent,
 		}); err != nil {
 			return result, err
@@ -488,6 +497,7 @@ func emitBudgetExceededDone(emit func(AgentStreamEvent) error, result AgentRunRe
 		Type:       "done",
 		Content:    result.Content,
 		Trace:      result.Trace,
+		Evidence:   result.Evidence,
 		RawContent: result.RawContent,
 	}); err != nil {
 		return result, err

@@ -33,12 +33,14 @@ Ternura 是一个以 Eino ADK 为执行内核、以 `internal/app` 为应用装�
 ```mermaid
 flowchart LR
     U["CLI / Feishu / Task API / Cron"] --> A["internal/app AgentSession"]
-    A --> C["ContextBuilder + Runtime Hooks"]
+    A --> TL["Eino TurnLoop for live sessions"]
+    TL --> C["ContextBuilder + Runtime Hooks"]
     C --> R["Eino ADK Runner"]
     R --> M["ChatModelAgent"]
     M -->|tool call| T["Eino ToolsNode"]
-    T --> L["Local Tools / MCP Tools"]
-    L --> M
+    T --> LT["Local Tools / MCP Tools"]
+    LT --> E["Evidence Ledger"]
+    E --> M
     M --> G["Finalize Hooks and Guards"]
     G --> P["Session Store / Artifacts / Runtime Monitor"]
     P --> O["Feishu reply / Task API / Admin SSE"]
@@ -46,19 +48,33 @@ flowchart LR
 
 模型的一次 `Generate` 只完成一次模型交互；ReAct 的多轮“模型 -> 工具 -> 模型”由 Eino ADK Runner 编排。Ternura 负责提供 ChatModel、Tools、运行上下文和扩展 Hook，不再手写工具循环。
 
+普通飞书消息和 HTTP Task 按 session 进入 Eino `TurnLoop`。同一 session 在运行中收到新消息时，框架会在 `AfterChatModel` 或 `AfterToolCalls` 安全点抢占当前 turn；短时间连续补充只执行最新一条。审批恢复、cron 触发和确定性本地操作仍复用 AgentSession 生命周期，但不会伪装成新的模型 turn。
+
 ## AgentSession 生命周期
 
 `internal/app.AgentSession` 统一管理不同入口的运行：
 
-1. 把外部输入整理为 `agentSessionRunRequest`。
+1. 把外部输入整理为 `agentSessionRunRequest` 或 live session 的 `sessionTurnRequest`。
 2. 区分展示给用户的 `DisplayMessage` 和送入模型的 `RuntimePrompt`。
 3. 创建 `run_id`，写入 session store，并注册 Runtime Monitor。
 4. 恢复对应 session 的消息和记忆。
 5. 调用 Agent 或从 checkpoint 恢复审批运行。
-6. 写入最终状态、回答、trace、metrics 和 Artifact。
+6. 写入最终状态、回答、trace、evidence、metrics 和 Artifact。
 7. 向飞书、Task API 或管理页暴露同一份结果。
 
 Feishu、cron 和异步 Task 不各自实现 start/run/finish，从而避免状态、错误和持久化行为分叉。
+
+### 运行中纠偏
+
+运行中的新消息不是简单排队到旧回答之后：
+
+1. 新输入写入当前 session 的 `TurnLoop` buffer。
+2. Eino 请求当前 ChatModelAgent 在最近安全点取消。
+3. 已被抢占的 run 记录为 `cancelled`，不进入对话历史。
+4. 新 turn 的 `RuntimePrompt` 包含原始请求和按时间排序的补充，最后一条优先。
+5. 持久化 run 仍保留用户实际输入作为 `UserMessage`，而模型历史保存完整修正后的 user/assistant Turn。
+
+连续到达的补充会合并为最新要求；尚未开始模型执行的旧补充标记为被替代，不消耗模型调用。
 
 ## SkillRegistry
 
@@ -114,6 +130,20 @@ ContextBuilder 保持完整 user/assistant/tool 语义链，并按以下顺序�
 5. 最终预算裁剪：始终保留最新用户输入，并按 tool-call group 从尾部保留。
 
 Provider 返回 `prompt_too_long` 或同类错误时，会触发 reactive compact 并重试一次。摘要失败则回退到确定性裁剪，避免上下文模块阻断整次运行。
+
+守护进程重启时只恢复清洗后完整的 `user -> assistant` 对。孤立消息、空回答、被拦截回答和未完成 run 会整轮跳过，最多保留最近 12 个完整 Turn，不再向模型注入连续的 user-only 历史。
+
+## Evidence Ledger
+
+Tool middleware 在真实工具返回后生成结构化证据记录，每条包含 `E#`、工具名、类型、状态、来源 URL、摘要、采集时间和内容 SHA-256：
+
+- `web_fetch` 成功读取的页面是可引用 `source`。
+- `web_search` 结果只是不可引用的 `discovery`，必须继续 fetch 才能支撑事实。
+- 文件读取、命令和 MCP 返回记录为 `observation`。
+- 写入、编辑、记忆和 cron 等副作用记录为 `action`。
+- 失败、拒绝和不可用页面同样保留，但标记为不可引用。
+
+每次后续模型调用都会收到当前 run 的 Evidence Ledger runtime block，并使用 `[E1]` 形式关联结论。账本不调用第二个 verifier 模型，也不替模型做事实判断；飞书折叠面板、Task API、run JSON 和管理页读取的是同一份确定性记录。
 
 ## 记忆
 
@@ -187,7 +217,7 @@ Harness 不做统一前置意图路由，工具选择主要由模型、Skill 和
 Runtime Monitor 是内存中的轻量运行视图，不替代 session store：
 
 - AgentSession 创建和结束运行时注册 lifecycle。
-- 模型与工具 Hook 更新 `thinking`、`tool` 和 `finishing` 阶段。
+- 模型、工具和 TurnLoop 更新 `thinking`、`tool`、`correcting` 和 `finishing` 阶段。
 - `/api/runtime` 返回当前快照。
 - `/api/events` 通过 SSE 发布开始、更新和结束事件。
 - 管理页收到事件后刷新持久化 Task 详情。
@@ -200,6 +230,7 @@ Runtime Monitor 是内存中的轻量运行视图，不替代 session store：
 
 - `content`：去掉 think 后的最终回答。
 - `trace`：思考阶段和工具调用记录。
+- `evidence`：结构化 Tool 证据账本。
 - `raw_content`：模型最后一次原始输出。
 - `model_input`：用于诊断的模型输入快照。
 - `metrics`：模型调用、工具调用和 Token 统计。

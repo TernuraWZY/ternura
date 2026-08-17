@@ -11,11 +11,12 @@ import (
 )
 
 const (
-	runtimeStageQueued    = "queued"
-	runtimeStageStarted   = "started"
-	runtimeStageThinking  = "thinking"
-	runtimeStageTool      = "tool"
-	runtimeStageFinishing = "finishing"
+	runtimeStageQueued     = "queued"
+	runtimeStageStarted    = "started"
+	runtimeStageThinking   = "thinking"
+	runtimeStageTool       = "tool"
+	runtimeStageCorrecting = "correcting"
+	runtimeStageFinishing  = "finishing"
 )
 
 type runtimeRunState struct {
@@ -242,6 +243,8 @@ func runtimeStageDetail(stage string) string {
 		return "模型正在思考并决定下一步"
 	case runtimeStageTool:
 		return "正在执行工具"
+	case runtimeStageCorrecting:
+		return "收到新的补充，正在安全切换"
 	case runtimeStageFinishing:
 		return "正在整理最终结果"
 	default:

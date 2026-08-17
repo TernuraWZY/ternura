@@ -17,6 +17,31 @@ func TestFormatFeishuAgentReplyKeepsPlainContentWhenTraceEmpty(t *testing.T) {
 	}
 }
 
+func TestFormatFeishuAgentReplyUsesCollapsedEvidenceLedger(t *testing.T) {
+	reply := formatFeishuAgentReply(agent.AgentRunResult{
+		Content: "结论来自抓取页面 [E1]。",
+		Evidence: []agent.EvidenceRecord{{
+			ID:      "E1",
+			Kind:    "source",
+			Tool:    "web_fetch",
+			Title:   "官方文档",
+			URL:     "https://example.com/docs",
+			Excerpt: "页面中的可核验内容。",
+			Status:  "succeeded",
+			Citable: true,
+		}},
+	})
+
+	if reply.Card == nil {
+		t.Fatal("evidence reply should use an interactive card")
+	}
+	for _, want := range []string{"证据账本", "[E1]", "官方文档", "https://example.com/docs", "可引用"} {
+		if !strings.Contains(reply.Content, want) || !strings.Contains(fmt.Sprint(reply.Card), want) {
+			t.Fatalf("evidence reply missing %q: content=%s card=%v", want, reply.Content, reply.Card)
+		}
+	}
+}
+
 func TestFormatFeishuAgentReplyUsesCollapsedTracePanels(t *testing.T) {
 	reply := formatFeishuAgentReply(agent.AgentRunResult{
 		Content: "完成了",

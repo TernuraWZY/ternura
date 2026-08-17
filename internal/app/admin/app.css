@@ -737,6 +737,19 @@ td.action-column {
   white-space: pre-wrap;
 }
 
+.evidence-url {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--blue);
+}
+
+.evidence-excerpt {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
 .detail-accordion,
 .detail-list {
   display: grid;

@@ -21,6 +21,7 @@ func formatFeishuAgentReplyForSession(result agent.AgentRunResult, sessionID str
 	memoryItems := traceItemsByType(result.Trace, "memory")
 	thinkItems := traceItemsByType(result.Trace, "think")
 	toolItems := traceItemsByType(result.Trace, "tool")
+	evidenceItems := sanitizeEvidenceForFeishu(result.Evidence)
 	fallbackContent := sanitizeFeishuReplyText(strings.TrimSpace(result.Content))
 	cardContent := fallbackContent
 	if result.PendingApproval != nil {
@@ -29,24 +30,27 @@ func formatFeishuAgentReplyForSession(result agent.AgentRunResult, sessionID str
 	memoryItems = sanitizeTraceItemsForFeishu(memoryItems)
 	thinkItems = sanitizeTraceItemsForFeishu(thinkItems)
 	toolItems = sanitizeTraceItemsForFeishu(toolItems)
-	if result.PendingApproval == nil && len(memoryItems) == 0 && len(thinkItems) == 0 && len(toolItems) == 0 {
+	if result.PendingApproval == nil && len(memoryItems) == 0 && len(thinkItems) == 0 && len(toolItems) == 0 && len(evidenceItems) == 0 {
 		return feishu.Reply{Content: fallbackContent}
 	}
 
-	fallback := formatFeishuAgentReplyText(fallbackContent, memoryItems, thinkItems, toolItems)
+	fallback := formatFeishuAgentReplyText(fallbackContent, memoryItems, thinkItems, toolItems, evidenceItems)
 	return feishu.Reply{
 		Content: fallback,
-		Card:    buildFeishuAgentReplyCard(cardContent, memoryItems, thinkItems, toolItems, result.PendingApproval, sessionID),
+		Card:    buildFeishuAgentReplyCard(cardContent, memoryItems, thinkItems, toolItems, evidenceItems, result.PendingApproval, sessionID),
 	}
 }
 
-func formatFeishuAgentReplyText(content string, memoryItems []agent.AgentTraceItem, thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem) string {
+func formatFeishuAgentReplyText(content string, memoryItems []agent.AgentTraceItem, thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem, evidenceItems []agent.EvidenceRecord) string {
 	sections := make([]string, 0, 3)
 	if content != "" {
 		sections = append(sections, content)
 	}
 	if len(memoryItems) > 0 || len(thinkItems) > 0 || len(toolItems) > 0 {
 		sections = append(sections, formatFeishuTraceSection(memoryItems, thinkItems, toolItems))
+	}
+	if len(evidenceItems) > 0 {
+		sections = append(sections, "## 证据账本\n\n"+formatFeishuEvidenceGroup(evidenceItems))
 	}
 	return strings.TrimSpace(strings.Join(sections, "\n\n---\n\n"))
 }
@@ -94,15 +98,15 @@ func formatFeishuTraceGroup(title string, items []agent.AgentTraceItem) string {
 	return strings.Join(lines, "\n")
 }
 
-func buildFeishuAgentReplyCard(content string, memoryItems []agent.AgentTraceItem, thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem, approval *agent.ToolApprovalRequest, sessionID string) map[string]any {
-	elements := make([]any, 0, 5)
+func buildFeishuAgentReplyCard(content string, memoryItems []agent.AgentTraceItem, thinkItems []agent.AgentTraceItem, toolItems []agent.AgentTraceItem, evidenceItems []agent.EvidenceRecord, approval *agent.ToolApprovalRequest, sessionID string) map[string]any {
+	elements := make([]any, 0, 6)
 	if content != "" {
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
 			"content": content,
 		})
 	}
-	if content != "" && (len(memoryItems) > 0 || len(thinkItems) > 0 || len(toolItems) > 0) {
+	if content != "" && (len(memoryItems) > 0 || len(thinkItems) > 0 || len(toolItems) > 0 || len(evidenceItems) > 0) {
 		elements = append(elements, map[string]any{"tag": "hr"})
 	}
 	if len(memoryItems) > 0 {
@@ -113,6 +117,9 @@ func buildFeishuAgentReplyCard(content string, memoryItems []agent.AgentTraceIte
 	}
 	if len(toolItems) > 0 {
 		elements = append(elements, feishuCollapsiblePanel("工具调用", len(toolItems), formatFeishuTraceGroup("工具调用", toolItems)))
+	}
+	if len(evidenceItems) > 0 {
+		elements = append(elements, feishuCollapsiblePanel("证据账本", len(evidenceItems), formatFeishuEvidenceGroup(evidenceItems)))
 	}
 	if approval != nil {
 		elements = append(elements, feishuApprovalActions(*approval, sessionID))
@@ -134,6 +141,32 @@ func buildFeishuAgentReplyCard(content string, memoryItems []agent.AgentTraceIte
 		}
 	}
 	return card
+}
+
+func formatFeishuEvidenceGroup(records []agent.EvidenceRecord) string {
+	sections := make([]string, 0, len(records))
+	for _, record := range records {
+		title := strings.TrimSpace(record.Title)
+		if title == "" {
+			title = record.Tool
+		}
+		lines := []string{fmt.Sprintf("**[%s] %s**", record.ID, title)}
+		kind := record.Kind
+		if record.Citable {
+			kind += " · 可引用"
+		} else {
+			kind += " · 仅供发现/审计"
+		}
+		lines = append(lines, fmt.Sprintf("`%s` · `%s` · `%s`", record.Tool, kind, record.Status))
+		if record.URL != "" {
+			lines = append(lines, record.URL)
+		}
+		if record.Excerpt != "" {
+			lines = append(lines, "", limitFeishuTraceContent(record.Excerpt))
+		}
+		sections = append(sections, strings.Join(lines, "\n"))
+	}
+	return strings.Join(sections, "\n\n")
 }
 
 func formatFeishuApprovalSummary(approval agent.ToolApprovalRequest) string {
@@ -242,6 +275,19 @@ func sanitizeTraceItemsForFeishu(items []agent.AgentTraceItem) []agent.AgentTrac
 	for _, item := range items {
 		item.Content = sanitizeFeishuReplyText(item.Content)
 		out = append(out, item)
+	}
+	return out
+}
+
+func sanitizeEvidenceForFeishu(records []agent.EvidenceRecord) []agent.EvidenceRecord {
+	if len(records) == 0 {
+		return nil
+	}
+	out := make([]agent.EvidenceRecord, len(records))
+	copy(out, records)
+	for idx := range out {
+		out[idx].Title = sanitizeFeishuReplyText(out[idx].Title)
+		out[idx].Excerpt = sanitizeFeishuReplyText(out[idx].Excerpt)
 	}
 	return out
 }

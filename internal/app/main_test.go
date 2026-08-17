@@ -83,6 +83,42 @@ func TestSessionStorePersistsRunsAndConversation(t *testing.T) {
 	}
 }
 
+func TestSessionStorePersistsEvidenceLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	store := newSessionStore(path)
+	run := runLifecycle{ID: "run-evidence", StartedAt: time.Now()}
+	if err := store.StartRun(run, "source question"); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if err := store.FinishRun(run, "source question", agent.AgentRunResult{
+		Content: "answer [E1]",
+		Evidence: []agent.EvidenceRecord{{
+			ID:          "E1",
+			Kind:        "source",
+			Tool:        "web_fetch",
+			Title:       "Source",
+			URL:         "https://example.com",
+			ContentHash: "sha256:abc",
+			Status:      "succeeded",
+			Citable:     true,
+		}},
+	}, runStatusSucceeded, time.Now(), nil); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+
+	reloaded := newSessionStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("load store: %v", err)
+	}
+	session, ok := currentSessionFromSnapshot(reloaded.Snapshot())
+	if !ok || len(session.Runs) != 1 || len(session.Runs[0].Evidence) != 1 {
+		t.Fatalf("persisted evidence missing: %+v", session)
+	}
+	if session.Runs[0].Evidence[0].URL != "https://example.com" {
+		t.Fatalf("persisted evidence = %+v", session.Runs[0].Evidence)
+	}
+}
+
 func TestSessionStorePersistsModelInputSnapshots(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.json")
 	store := newSessionStore(path)
@@ -278,34 +314,35 @@ func TestMessageRequestsNewSession(t *testing.T) {
 func TestCleanConversationForRestoreDropsNoiseAndCapsHistory(t *testing.T) {
 	persisted := []persistedMessage{
 		{Role: "system", Content: "ignored"},
+		{Role: "assistant", Content: "orphan assistant"},
 		{Role: "user", Content: "old user"},
 		{Role: "assistant", Content: "<think>secret</think>\nold clean answer"},
+		{Role: "user", Content: "blocked user"},
 		{Role: "assistant", Content: "我拦截了这次回复：没有本轮工具证据支撑。"},
+		{Role: "user", Content: "orphan user"},
 		{Role: "user", Content: "middle user"},
 		{Role: "assistant", Content: "middle answer"},
 		{Role: "user", Content: "latest user"},
 		{Role: "assistant", Content: "latest answer"},
 	}
 
-	cleaned := cleanConversationForRestore(persisted, 4)
+	cleaned := cleanConversationForRestore(persisted, 2)
 
-	if len(cleaned) != 3 {
-		t.Fatalf("cleaned messages = %d, want user-only history: %+v", len(cleaned), cleaned)
+	if len(cleaned) != 4 {
+		t.Fatalf("cleaned messages = %d, want two complete turns: %+v", len(cleaned), cleaned)
 	}
 	combined := ""
 	for _, message := range cleaned {
 		combined += message.Role + ":" + message.Content + "\n"
 	}
-	for _, blocked := range []string{"system", "<think>", "secret", "我拦截了这次回复"} {
+	for _, blocked := range []string{"system", "<think>", "secret", "我拦截了这次回复", "old user", "blocked user", "orphan user", "orphan assistant"} {
 		if strings.Contains(combined, blocked) {
 			t.Fatalf("restore conversation still contains blocked content %q:\n%s", blocked, combined)
 		}
 	}
-	if strings.Contains(combined, "assistant:") {
-		t.Fatalf("assistant history should not be restored into model context:\n%s", combined)
-	}
-	if !strings.Contains(combined, "latest user") {
-		t.Fatalf("latest clean history should be preserved:\n%s", combined)
+	want := "user:middle user\nassistant:middle answer\nuser:latest user\nassistant:latest answer\n"
+	if combined != want {
+		t.Fatalf("restored conversation =\n%s\nwant =\n%s", combined, want)
 	}
 }
 

@@ -101,6 +101,8 @@ type agentServer struct {
 	taskMu               sync.Mutex
 	taskCancels          map[string]context.CancelFunc
 	taskSessionLocks     map[string]*sync.Mutex
+	turnLoopMu           sync.Mutex
+	turnLoops            map[string]*sessionTurnLoop
 	inventoryMu          sync.RWMutex
 	inventory            runtimeInventorySnapshot
 }
@@ -118,6 +120,7 @@ func newAgentServerWithContext(ctx context.Context, modelConf config.ModelConfig
 		ctx:              ctx,
 		taskCancels:      make(map[string]context.CancelFunc),
 		taskSessionLocks: make(map[string]*sync.Mutex),
+		turnLoops:        make(map[string]*sessionTurnLoop),
 	}
 	s.checkpoints = agent.NewFileCheckPointStore(filepath.Join(s.store.root, "checkpoints"))
 	s.memory = newMemoryStore(s.store.root)
@@ -159,6 +162,7 @@ func (s *agentServer) close() {
 		return
 	}
 	s.cancelAllTasks()
+	s.stopAllSessionTurnLoops()
 	if s.mcpRuntime != nil {
 		if err := s.mcpRuntime.Close(); err != nil {
 			log.Printf("close MCP integrations: %v", err)
@@ -258,34 +262,52 @@ func (s *agentServer) resetAgentFromSnapshot(snapshot sessionSnapshot) {
 }
 
 func restoreAgentConversation(agentInstance *agent.Agent, persisted []persistedMessage) int {
-	messages := cleanConversationForRestore(persisted, maxRestoredConversationMessages)
+	messages := cleanConversationForRestore(persisted, maxRestoredConversationTurns)
 	agentInstance.RestoreConversation(messages)
 	return len(messages)
 }
 
-const maxRestoredConversationMessages = 12
+const maxRestoredConversationTurns = 12
 
-func cleanConversationForRestore(persisted []persistedMessage, maxMessages int) []agent.ConversationMessage {
-	messages := make([]agent.ConversationMessage, 0, len(persisted))
+func cleanConversationForRestore(persisted []persistedMessage, maxTurns int) []agent.ConversationMessage {
+	type conversationTurn struct {
+		user      agent.ConversationMessage
+		assistant agent.ConversationMessage
+	}
+
+	turns := make([]conversationTurn, 0, len(persisted)/2)
+	var pendingUser *agent.ConversationMessage
 	for _, message := range persisted {
 		role := strings.TrimSpace(message.Role)
 		content := strings.TrimSpace(message.Content)
 		if content == "" {
 			continue
 		}
-		if role == "assistant" {
-			continue
+		switch role {
+		case "user":
+			user := agent.ConversationMessage{Role: "user", Content: content}
+			pendingUser = &user
+		case "assistant":
+			if pendingUser == nil {
+				continue
+			}
+			content = agent.CleanAssistantContentForHistory(content)
+			if content != "" && !agent.ShouldOmitAssistantFromHistory(content) {
+				turns = append(turns, conversationTurn{
+					user:      *pendingUser,
+					assistant: agent.ConversationMessage{Role: "assistant", Content: content},
+				})
+			}
+			pendingUser = nil
 		}
-		if role != "user" && role != "assistant" {
-			continue
-		}
-		messages = append(messages, agent.ConversationMessage{
-			Role:    role,
-			Content: content,
-		})
 	}
-	if maxMessages > 0 && len(messages) > maxMessages {
-		messages = messages[len(messages)-maxMessages:]
+	if maxTurns > 0 && len(turns) > maxTurns {
+		turns = turns[len(turns)-maxTurns:]
+	}
+
+	messages := make([]agent.ConversationMessage, 0, len(turns)*2)
+	for _, turn := range turns {
+		messages = append(messages, turn.user, turn.assistant)
 	}
 	return messages
 }
